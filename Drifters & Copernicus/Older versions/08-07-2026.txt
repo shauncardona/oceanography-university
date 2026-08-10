@@ -1,0 +1,253 @@
+# LOADING LIBRARIES
+
+import glob
+import os
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import xarray as xr
+from opendrift.models.oceandrift import OceanDrift
+from opendrift.readers import reader_netCDF_CF_generic
+
+# Constants
+EARTH_RADIUS_M = 6371000.0
+
+# ----------------------------------------------------------------------
+
+# INPUT FILES
+DRIFTER_CSV = r"E:/University/Applied Oceanography/Dissertation/Comparison Drifters/Drifter Data/SST_DATA_9.csv"
+CURRENTS_FILE = r"E:/University/Applied Oceanography/Dissertation/Comparison Drifters/data2026/Day0/currents.nc"
+WAVE_FILE = r"E:/University/Applied Oceanography/Dissertation/Comparison Drifters/data2026/Day0/waves.nc"
+WIND_FILE = r"E:/University/Applied Oceanography/Dissertation/Comparison Drifters/data2026/Wind/Wind.grib2"
+
+# OUTPUT DIRECTORY
+OUTPUT_DIR = r"E:/University/Applied Oceanography/Dissertation/Comparison Drifters/Output"
+
+# ----------------------------------------------------------------------
+
+# CONFIGURATION PARAMETERS
+
+# These variables are no longer hardcoded:
+# START_LON, START_LAT, START_TIME (extracted dynamically from CSV below)
+
+# Which reading to seed the simulation from. FID is the drifter's own
+# sequential reading number (its "timestep index"), not a sort-derived
+# position. Leave as None to automatically use the smallest FID in the
+# data (i.e. the very first reading ever logged). Set to a specific
+# integer if you want to seed from a different reading instead.
+TARGET_FID = 40
+
+# Physics & Output Cadence Configurations
+MODEL_TIME_STEP_SECONDS = 900
+OUTPUT_EVERY_SECONDS = 1800
+USE_WAVE_STOKES_DRIFT = True
+
+# ----------------------------------------------------------------------
+
+# LOADING ACTUAL DRIFTER DATA
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Parse drifter log files
+if os.path.isdir(DRIFTER_CSV):
+    csv_files = sorted(glob.glob(os.path.join(DRIFTER_CSV, "*.csv")))
+else:
+    csv_files = [DRIFTER_CSV] if os.path.isfile(DRIFTER_CSV) else []
+
+if not csv_files:
+    raise FileNotFoundError(f"Target drifter CSV file or folder path not found: {DRIFTER_CSV}")
+
+frames = []
+for f in csv_files:
+    df = pd.read_csv(f)
+    # FID is kept alongside the position/time columns so the true first
+    # reading can be identified later, independent of any sorting or
+    # timezone handling done below. UtcTimestamp is already in UTC
+    # (note the +00:00 offset), so it's used directly instead of
+    # reconstructing UTC from a local Malta time column.
+    frames.append(df[["FID", "UtcTimestamp", "Latitude", "Longitude"]])
+
+drifter_df = pd.concat(frames, ignore_index=True)
+
+# Parse the UTC timestamp directly (it already carries a +00:00 offset,
+# so no local-timezone reconstruction is needed).
+drifter_df["time_utc"] = (
+    pd.to_datetime(drifter_df["UtcTimestamp"], utc=True).dt.tz_localize(None)
+)
+
+# Drop NaNs, sort, and remove duplicate timestamps
+drifter_df = (
+    drifter_df.dropna(subset=["time_utc"])
+    .sort_values("time_utc")
+    .drop_duplicates(subset="time_utc")
+    .reset_index(drop=True)
+)
+drifter_df = drifter_df.rename(columns={"Latitude": "lat", "Longitude": "lon"})
+
+if drifter_df.empty:
+    raise ValueError(f"Target drifter CSV resulted in an empty dataset after processing NaNs/duplicates: {DRIFTER_CSV}")
+
+# --- FIX: seed from the true first reading (by FID), not from whatever
+# row happens to land first after timezone conversion / dedup / sorting.
+# Previously the code took iloc[0] of the sorted dataframe, which could
+# silently pick a different row than the drifter's actual first reading
+# if any earlier row got dropped as a duplicate/NaT or reordered by the
+# timezone conversion - this is why the simulated track didn't start at
+# the same point as the actual track. ---
+if TARGET_FID is None:
+    seed_fid = drifter_df["FID"].min()
+else:
+    seed_fid = TARGET_FID
+
+seed_rows = drifter_df.loc[drifter_df["FID"] == seed_fid]
+if seed_rows.empty:
+    raise ValueError(
+        f"FID {seed_fid} not found in the processed drifter data. "
+        f"Available FID range: {drifter_df['FID'].min()} - {drifter_df['FID'].max()}"
+    )
+first_point = seed_rows.iloc[0]
+
+# Replace old hardcoded seed parameters with extracted values
+START_LON = first_point["lon"]
+START_LAT = first_point["lat"]
+
+# NOTE: OpenDrift requires standard Python datetime, but pandas gives Timestamp. Convert using .to_pydatetime()
+pd_start_time = first_point["time_utc"]
+DYNAMIC_START_TIME_UTC_PY = pd_start_time.to_pydatetime()
+
+print(f"Drifter data loaded. Observations: {len(drifter_df)}")
+print(f"DYNAMIC SEEDING matching FID {seed_fid}:")
+print(f"  Time (UTC): {pd_start_time} (Extracted from FID {seed_fid})")
+print(f"  Position:   Lat {START_LAT}, Lon {START_LON}")
+
+# Update duration calculation dynamically based strictly on drifter time window
+end_time_utc = drifter_df["time_utc"].max()
+simulation_duration_delta = end_time_utc - pd_start_time
+
+# ----------------------------------------------------------------------
+
+# READING ENVIRONMENT FORECAST FILES
+
+# Wind GRIB Dataset Format Configurations
+wind_dataset = xr.open_dataset(WIND_FILE, engine="cfgrib", backend_kwargs={"indexpath": ""})
+if "step" in wind_dataset.dims and "valid_time" in wind_dataset.coords:
+    wind_dataset = wind_dataset.rename({"time": "reference_time"})
+    wind_dataset = wind_dataset.swap_dims({"step": "valid_time"})
+    wind_dataset = wind_dataset.rename({"valid_time": "time"})
+
+if "u10" in wind_dataset.variables:
+    wind_dataset["u10"].attrs["standard_name"] = "eastward_wind"
+if "v10" in wind_dataset.variables:
+    wind_dataset["v10"].attrs["standard_name"] = "northward_wind"
+
+wind_reader = reader_netCDF_CF_generic.Reader(wind_dataset, name="ECMWF operational wind")
+wave_reader = reader_netCDF_CF_generic.Reader(WAVE_FILE, name="Copernicus waves")
+current_reader = reader_netCDF_CF_generic.Reader(CURRENTS_FILE, name="Copernicus surface currents")
+
+# ----------------------------------------------------------------------
+
+# RUNNING OPENDRIFT
+
+model = OceanDrift(loglevel=20)
+model.add_reader([wind_reader, wave_reader, current_reader])
+
+model.set_config("drift:stokes_drift", USE_WAVE_STOKES_DRIFT)
+model.set_config("drift:use_tabularised_stokes_drift", False)
+
+# Seed using dynamically extracted variables
+model.seed_elements(
+    lon=START_LON,
+    lat=START_LAT,
+    number=1,
+    radius=0,
+    time=DYNAMIC_START_TIME_UTC_PY,
+    z=0
+)
+
+# Run using dynamically calculated duration
+model.run(
+    duration=simulation_duration_delta,
+    time_step=MODEL_TIME_STEP_SECONDS,
+    time_step_output=OUTPUT_EVERY_SECONDS,
+)
+
+# ----------------------------------------------------------------------
+
+# EXTRACTING TRACKS & PROCESSING SEPARATION METRICS
+
+# Parse Simulated Data out of OpenDrift result framework
+predicted_times = pd.to_datetime(model.result.time.values)
+predicted_lons = model.result.lon.values[0, :]
+predicted_lats = model.result.lat.values[0, :]
+
+predicted_df = pd.DataFrame({
+    "time_utc": predicted_times,
+    "pred_lat": predicted_lats,
+    "pred_lon": predicted_lons
+}).sort_values("time_utc").reset_index(drop=True)
+
+# Copy and Align Data Types to standard nanosecond timestamps to avoid merging errors
+df_actual_calc = drifter_df.copy()
+df_pred_calc = predicted_df.copy()
+df_actual_calc["time_utc"] = df_actual_calc["time_utc"].astype("datetime64[ns]")
+df_pred_calc["time_utc"] = df_pred_calc["time_utc"].astype("datetime64[ns]")
+
+# Match positions on nearest temporal grid coordinates
+merged_df = pd.merge_asof(
+    df_actual_calc.sort_values("time_utc"),
+    df_pred_calc.sort_values("time_utc"),
+    on="time_utc",
+    direction="nearest",
+    tolerance=pd.Timedelta("30min"),
+).dropna(subset=["pred_lat", "pred_lon"]).reset_index(drop=True)
+
+# Haversine tracking math implementation
+lat1, lon1, lat2, lon2 = map(np.radians, [merged_df["lat"], merged_df["lon"], merged_df["pred_lat"], merged_df["pred_lon"]])
+dlat = lat2 - lat1
+dlon = lon2 - lon1
+haversine_array = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
+merged_df["separation_km"] = (2 * EARTH_RADIUS_M * np.arcsin(np.sqrt(haversine_array))) / 1000.0
+
+# ----------------------------------------------------------------------
+
+# SAVING OUTPUT DATA & PLOTS
+
+# Export Logs to CSV files
+drifter_df.to_csv(os.path.join(OUTPUT_DIR, "drifter_actual_track.csv"), index=False)
+predicted_df.to_csv(os.path.join(OUTPUT_DIR, "predicted_track.csv"), index=False)
+merged_df.to_csv(os.path.join(OUTPUT_DIR, "separation_distances.csv"), index=False)
+
+# Plot 1: Standard Scatter Trajectory Validation
+fig, ax = plt.subplots(figsize=(9, 8))
+ax.plot(drifter_df["lon"], drifter_df["lat"], "-o", color="blue", label="Actual drifter track", markersize=3, linewidth=1.5)
+ax.plot(predicted_df["pred_lon"], predicted_df["pred_lat"], "-o", color="red", label="OpenDrift track", markersize=3, linewidth=1.5)
+ax.set_xlabel("Longitude")
+ax.set_ylabel("Latitude")
+ax.set_title("Drifter Trajectory Validation: Actual vs. OpenDrift")
+ax.legend()
+ax.grid(True, linestyle="--", alpha=0.4)
+ax.set_aspect("equal", adjustable="datalim")
+fig.tight_layout()
+fig.savefig(os.path.join(OUTPUT_DIR, "track_comparison.png"), dpi=200)
+plt.close(fig)
+
+# Plot 2: Separation Distance Over Time
+fig, ax = plt.subplots(figsize=(10, 5))
+ax.plot(merged_df["time_utc"], merged_df["separation_km"], "-o", color="black", markersize=3)
+ax.set_xlabel("Time (UTC)")
+ax.set_ylabel("Separation distance (km)")
+ax.set_title("Distance Between Observed and OpenDrift Positions")
+ax.grid(True, linestyle="--", alpha=0.4)
+fig.autofmt_xdate()
+fig.tight_layout()
+fig.savefig(os.path.join(OUTPUT_DIR, "separation_distance.png"), dpi=200)
+plt.close(fig)
+
+# Print Summary Stats directly to console terminal
+print(f"\nMean separation error:  {merged_df['separation_km'].mean():.3f} km")
+print(f"Max separation error:   {merged_df['separation_km'].max():.3f} km")
+print(f"Final separation error: {merged_df['separation_km'].iloc[-1]:.3f} km")
+print(f"\nValidation seeding: Time (UTC) {pd_start_time}, Position ({START_LAT}, {START_LON})")
+print(f"Validation end:     Time (UTC) {end_time_utc}")
+print(f"\nAll outputs successfully saved to: {OUTPUT_DIR}")
