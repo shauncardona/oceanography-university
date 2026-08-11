@@ -25,13 +25,13 @@ CURRENTS_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Currents\
 WAVE_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Waves\MonthWaveAnalysis.nc"
 
 # OUTPUT DIRECTORY
-OUTPUT_DIR = r"E:\University\Applied Oceanography\Dissertation\oceanography-university\Drifters & PlasticDrift\Output\Drifter 1\Day 4"
+OUTPUT_DIR = r"E:\University\Applied Oceanography\Dissertation\oceanography-university\Drifters & PlasticDrift\Output\Drifter 1\1 Week Cycle"
 
 # ----------------------------------------------------------------------
 
 # CONFIGURATION PARAMETERS
-FID_START = 144           # simulation seed position & start time come from this FID's first observation
-SIMULATION_DURATION_DAYS = 3  # simulation automatically ends this many days after the start time
+FID_START = 0           # simulation seed position & start time come from this FID's first observation
+SIMULATION_DURATION_DAYS = 7  # simulation automatically ends this many days after the start time
 MODEL_TIME_STEP_SECONDS = 900
 OUTPUT_EVERY_SECONDS = 1800
 USE_WAVE_STOKES_DRIFT = True

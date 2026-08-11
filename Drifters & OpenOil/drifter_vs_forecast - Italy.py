@@ -1,5 +1,4 @@
 # LOADING LIBRARIES
-#bonguNakta
 import glob
 import os
 from tkinter.constants import ALL
@@ -20,18 +19,18 @@ EARTH_RADIUS_M = 6371000.0
 # ----------------------------------------------------------------------
 
 # INPUT FILES & DIRECTORIES
-DRIFTER_CSV = r"E:\University\Applied Oceanography\Dissertation\oceanography-university\Drifters & Copernicus\Drifter Data\Drifter 1.csv"
-CURRENTS_FILE = r"E:\University\Applied Oceanography\Dissertation\oceanography-university\Drifters & Copernicus\data\MonthCurrentsAnalysis.nc"
-WAVE_FILE = r"E:\University\Applied Oceanography\Dissertation\oceanography-university\Drifters & Copernicus\data\MonthWaveAnalysis.nc"
+DRIFTER_CSV = r"E:\University\Applied Oceanography\Dissertation\Data\Drifter Data\Drifter 1.csv"
+CURRENTS_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Currents\MonthCurrentsAnalysis.nc"
+WAVE_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Waves\MonthWaveAnalysis.nc"
 
 # OUTPUT DIRECTORY
-OUTPUT_DIR = r"E:\University\Applied Oceanography\Dissertation\oceanography-university\Drifters & Copernicus\Output\Drifter 1\Deployment"
+OUTPUT_DIR = r"E:\University\Applied Oceanography\Dissertation\oceanography-university\Drifters & OpenOil\Output\Drifter 1\1 Week Cycle"
 
 # ----------------------------------------------------------------------
 
 # CONFIGURATION PARAMETERS
 FID_START = 0           # simulation seed position & start time come from this FID's first observation
-SIMULATION_DURATION_DAYS = 38  # simulation automatically ends this many days after the start time
+SIMULATION_DURATION_DAYS = 7  # simulation automatically ends this many days after the start time
 MODEL_TIME_STEP_SECONDS = 900
 OUTPUT_EVERY_SECONDS = 1800
 USE_WAVE_STOKES_DRIFT = True
