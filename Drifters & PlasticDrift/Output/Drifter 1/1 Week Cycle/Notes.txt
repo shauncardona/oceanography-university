@@ -1,3 +1,0 @@
-Mean separation error:  17.049 km
-Max separation error:   28.180 km
-Final separation error: 28.180 km

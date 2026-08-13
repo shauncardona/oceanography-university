@@ -19,7 +19,7 @@ EARTH_RADIUS_M = 6371000.0
 # ----------------------------------------------------------------------
 
 # INPUT FILES & DIRECTORIES
-DRIFTER_CSV = r"E:\University\Applied Oceanography\Dissertation\Data\Drifter Data\Drifter 1.csv"
+DRIFTER_CSV = r"E:\University\Applied Oceanography\Dissertation\Data\Drifter Data\Drifter 2.csv"
 CURRENTS_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Currents\MonthCurrentsAnalysis.nc"
 WAVE_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Waves\MonthWaveAnalysis.nc"
 
@@ -37,7 +37,7 @@ USE_WAVE_STOKES_DRIFT = True
 
 # Open-Meteo historical forecast configuration
 OPENMETEO_MODEL = "italia_meteo_arpae_icon_2i"
-WIND_GRID_MARGIN_DEG = 0.2
+WIND_GRID_MARGIN_DEG = 0.02
 
 # ----------------------------------------------------------------------
 
@@ -272,6 +272,10 @@ actual_track_df.to_csv(os.path.join(OUTPUT_DIR, "drifter_actual_track.csv"), ind
 predicted_df.to_csv(os.path.join(OUTPUT_DIR, "predicted_track.csv"), index=False)
 merged_df.to_csv(os.path.join(OUTPUT_DIR, "separation_distances.csv"), index=False)
 
+# Human-readable start/end strings used in plot titles below
+start_str = pd_start_time.strftime("%Y-%m-%d %H:%M UTC")
+end_str = end_time_utc.strftime("%Y-%m-%d %H:%M UTC")
+
 fig, ax = plt.subplots(figsize=(9, 8))
 ax.plot(actual_track_df["lon"], actual_track_df["lat"], "-o", color="blue", label="Actual drifter track",
         markersize=3, linewidth=1.5, zorder=3)
@@ -279,7 +283,10 @@ ax.plot(predicted_df["pred_lon"], predicted_df["pred_lat"], "-o", color="red", l
         markersize=3, linewidth=1.5, zorder=2)
 ax.set_xlabel("Longitude")
 ax.set_ylabel("Latitude")
-ax.set_title("Drifter Trajectory Validation: Actual vs. OpenDrift")
+ax.set_title(
+    f"Drifter Trajectory Validation: Actual vs. OpenDrift\n"
+    f"Start: {start_str}   |   End: {end_str}"
+)
 ax.legend()
 ax.grid(True, linestyle="--", alpha=0.4)
 ax.set_aspect("equal", adjustable="datalim")
@@ -291,7 +298,10 @@ fig, ax = plt.subplots(figsize=(10, 5))
 ax.plot(merged_df["time_utc"], merged_df["separation_km"], "-o", color="black", markersize=3)
 ax.set_xlabel("Time (UTC)")
 ax.set_ylabel("Separation distance (km)")
-ax.set_title("Distance Between Observed and OpenDrift Positions")
+ax.set_title(
+    f"Distance Between Observed and OpenDrift Positions\n"
+    f"Start: {start_str}   |   End: {end_str}"
+)
 ax.grid(True, linestyle="--", alpha=0.4)
 fig.autofmt_xdate()
 fig.tight_layout()

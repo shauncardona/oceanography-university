@@ -25,13 +25,13 @@ CURRENTS_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Currents\
 WAVE_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Waves\MonthWaveAnalysis.nc"
 
 # OUTPUT DIRECTORY
-OUTPUT_DIR = r"E:\University\Applied Oceanography\Dissertation\oceanography-university\Drifters & PlasticDrift\Output\Drifter 1\1 Week Cycle"
+OUTPUT_DIR = r"E:\University\Applied Oceanography\Dissertation\Results\PlasticDrift\Drifter 1\3 Day Cycle\Day 32"
 
 # ----------------------------------------------------------------------
 
 # CONFIGURATION PARAMETERS
-FID_START = 0           # simulation seed position & start time come from this FID's first observation
-SIMULATION_DURATION_DAYS = 7  # simulation automatically ends this many days after the start time
+FID_START = 1489           # simulation seed position & start time come from this FID's first observation
+SIMULATION_DURATION_DAYS = 3  # simulation automatically ends this many days after the start time
 MODEL_TIME_STEP_SECONDS = 900
 OUTPUT_EVERY_SECONDS = 1800
 USE_WAVE_STOKES_DRIFT = True
@@ -42,7 +42,7 @@ TERMINAL_VELOCITY_M_S = 0.01
 
 # Open-Meteo historical forecast configuration
 OPENMETEO_MODEL = "italia_meteo_arpae_icon_2i"
-WIND_GRID_MARGIN_DEG = 0.2
+WIND_GRID_MARGIN_DEG = 0.02
 
 # ----------------------------------------------------------------------
 
@@ -278,6 +278,10 @@ actual_track_df.to_csv(os.path.join(OUTPUT_DIR, "drifter_actual_track.csv"), ind
 predicted_df.to_csv(os.path.join(OUTPUT_DIR, "predicted_track.csv"), index=False)
 merged_df.to_csv(os.path.join(OUTPUT_DIR, "separation_distances.csv"), index=False)
 
+# Human-readable start/end strings used in plot titles below
+start_str = pd_start_time.strftime("%Y-%m-%d %H:%M UTC")
+end_str = end_time_utc.strftime("%Y-%m-%d %H:%M UTC")
+
 fig, ax = plt.subplots(figsize=(9, 8))
 ax.plot(actual_track_df["lon"], actual_track_df["lat"], "-o", color="blue", label="Actual drifter track",
         markersize=3, linewidth=1.5, zorder=3)
@@ -285,7 +289,10 @@ ax.plot(predicted_df["pred_lon"], predicted_df["pred_lat"], "-o", color="red", l
         markersize=3, linewidth=1.5, zorder=2)
 ax.set_xlabel("Longitude")
 ax.set_ylabel("Latitude")
-ax.set_title("Drifter Trajectory Validation: Actual vs. OpenDrift PlastDrift")
+ax.set_title(
+    f"Drifter Trajectory Validation: Actual vs. OpenDrift PlastDrift\n"
+    f"Start: {start_str}   |   End: {end_str}"
+)
 ax.legend()
 ax.grid(True, linestyle="--", alpha=0.4)
 ax.set_aspect("equal", adjustable="datalim")
@@ -297,7 +304,10 @@ fig, ax = plt.subplots(figsize=(10, 5))
 ax.plot(merged_df["time_utc"], merged_df["separation_km"], "-o", color="black", markersize=3)
 ax.set_xlabel("Time (UTC)")
 ax.set_ylabel("Separation distance (km)")
-ax.set_title("Distance Between Observed and OpenDrift PlastDrift Positions")
+ax.set_title(
+    f"Distance Between Observed and OpenDrift PlastDrift Positions\n"
+    f"Start: {start_str}   |   End: {end_str}"
+)
 ax.grid(True, linestyle="--", alpha=0.4)
 fig.autofmt_xdate()
 fig.tight_layout()
@@ -307,4 +317,16 @@ plt.close(fig)
 print(f"\nMean separation error:  {merged_df['separation_km'].mean():.3f} km")
 print(f"Max separation error:   {merged_df['separation_km'].max():.3f} km")
 print(f"Final separation error: {merged_df['separation_km'].iloc[-1]:.3f} km")
+
+# Write separation error summary to a text file in the output directory
+summary_path = os.path.join(OUTPUT_DIR, "separation_error_summary.txt")
+with open(summary_path, "w") as f:
+    f.write("Drifter Trajectory Validation Summary\n")
+    f.write(f"Start: {start_str}\n")
+    f.write(f"End:   {end_str}\n\n")
+    f.write(f"Mean separation error:  {merged_df['separation_km'].mean():.3f} km\n")
+    f.write(f"Max separation error:   {merged_df['separation_km'].max():.3f} km\n")
+    f.write(f"Final separation error: {merged_df['separation_km'].iloc[-1]:.3f} km\n")
+
+print(f"Separation error summary written to: {summary_path}")
 print(f"\nAll outputs successfully saved to: {OUTPUT_DIR}")
