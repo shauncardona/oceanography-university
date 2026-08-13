@@ -24,7 +24,7 @@ CURRENTS_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Currents\
 WAVE_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Waves\MonthWaveAnalysis.nc"
 
 # OUTPUT DIRECTORY
-OUTPUT_DIR = r"E:\University\Applied Oceanography\Dissertation\oceanography-university\Drifters & OpenOil\Output\Drifter 1\1 Week Cycle"
+OUTPUT_DIR = r"E:\University\Applied Oceanography\Dissertation\Results\OpenOil\Drifter 2\1 Week Cycle"
 
 # ----------------------------------------------------------------------
 
@@ -311,4 +311,16 @@ plt.close(fig)
 print(f"\nMean separation error:  {merged_df['separation_km'].mean():.3f} km")
 print(f"Max separation error:   {merged_df['separation_km'].max():.3f} km")
 print(f"Final separation error: {merged_df['separation_km'].iloc[-1]:.3f} km")
+
+# Write separation error summary to a text file in the output directory
+summary_path = os.path.join(OUTPUT_DIR, "separation_error_summary.txt")
+with open(summary_path, "w") as f:
+    f.write("Drifter Trajectory Validation Summary\n")
+    f.write(f"Start: {start_str}\n")
+    f.write(f"End:   {end_str}\n\n")
+    f.write(f"Mean separation error:  {merged_df['separation_km'].mean():.3f} km\n")
+    f.write(f"Max separation error:   {merged_df['separation_km'].max():.3f} km\n")
+    f.write(f"Final separation error: {merged_df['separation_km'].iloc[-1]:.3f} km\n")
+
+print(f"Separation error summary written to: {summary_path}")
 print(f"\nAll outputs successfully saved to: {OUTPUT_DIR}")
