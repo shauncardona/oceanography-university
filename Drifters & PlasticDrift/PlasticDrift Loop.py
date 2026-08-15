@@ -25,7 +25,7 @@ CURRENTS_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Currents\
 WAVE_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Waves\MonthWaveAnalysis.nc"
 
 # BASE OUTPUT DIRECTORY - must contain subfolders "Day 1", "Day 2", ..., "Day 32"
-OUTPUT_BASE_DIR = r"E:\University\Applied Oceanography\Dissertation\Results\PlasticDrift\Drifter 2\1 Day Cycle"
+OUTPUT_BASE_DIR = r"E:\University\Applied Oceanography\Dissertation\Results\PlasticDrift\Drifter 2\3 Day Cycle"
 
 # EXCEL SCHEDULE - maps each Day number to the FID to seed from
 EXCEL_PATH = r"E:\University\Applied Oceanography\Dissertation\Data\Drifter Day FID\Drifter 2 Number Log.xlsx"  # <-- update to your actual path
@@ -35,7 +35,7 @@ FID_COLUMN = "FID"
 # ----------------------------------------------------------------------
 
 # CONFIGURATION PARAMETERS
-SIMULATION_DURATION_DAYS = 1  # simulation automatically ends this many days after the start time
+SIMULATION_DURATION_DAYS = 3  # simulation automatically ends this many days after the start time
 MODEL_TIME_STEP_SECONDS = 900
 OUTPUT_EVERY_SECONDS = 1800
 USE_WAVE_STOKES_DRIFT = True
@@ -277,7 +277,7 @@ def run_simulation_for_fid(fid_start, output_dir):
     fig, ax = plt.subplots(figsize=(9, 8))
     ax.plot(actual_track_df["lon"], actual_track_df["lat"], "-o", color="blue", label="Actual drifter track",
             markersize=3, linewidth=1.5, zorder=3)
-    ax.plot(predicted_df["pred_lon"], predicted_df["pred_lat"], "-o", color="red", label="OpenDrift (PlastDrift) track",
+    ax.plot(predicted_df["pred_lon"], predicted_df["pred_lat"], "-o", color="green", label="OpenDrift (PlastDrift) track",
             markersize=3, linewidth=1.5, zorder=2)
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")

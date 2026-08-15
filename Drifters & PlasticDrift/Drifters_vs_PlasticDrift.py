@@ -20,18 +20,18 @@ EARTH_RADIUS_M = 6371000.0
 # ----------------------------------------------------------------------
 
 # INPUT FILES & DIRECTORIES
-DRIFTER_CSV = r"E:\University\Applied Oceanography\Dissertation\Data\Drifter Data\Drifter 1.csv"
+DRIFTER_CSV = r"E:\University\Applied Oceanography\Dissertation\Data\Drifter Data\Drifter 2.csv"
 CURRENTS_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Currents\MonthCurrentsAnalysis.nc"
 WAVE_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Waves\MonthWaveAnalysis.nc"
 
 # OUTPUT DIRECTORY
-OUTPUT_DIR = r"E:\University\Applied Oceanography\Dissertation\Results\PlasticDrift\Drifter 1\3 Day Cycle\Day 32"
+OUTPUT_DIR = r"E:\University\Applied Oceanography\Dissertation\Results\PlasticDrift\Drifter 2\1 Week Cycle"
 
 # ----------------------------------------------------------------------
 
 # CONFIGURATION PARAMETERS
-FID_START = 1489           # simulation seed position & start time come from this FID's first observation
-SIMULATION_DURATION_DAYS = 3  # simulation automatically ends this many days after the start time
+FID_START = 0           # simulation seed position & start time come from this FID's first observation
+SIMULATION_DURATION_DAYS = 7  # simulation automatically ends this many days after the start time
 MODEL_TIME_STEP_SECONDS = 900
 OUTPUT_EVERY_SECONDS = 1800
 USE_WAVE_STOKES_DRIFT = True
@@ -285,7 +285,7 @@ end_str = end_time_utc.strftime("%Y-%m-%d %H:%M UTC")
 fig, ax = plt.subplots(figsize=(9, 8))
 ax.plot(actual_track_df["lon"], actual_track_df["lat"], "-o", color="blue", label="Actual drifter track",
         markersize=3, linewidth=1.5, zorder=3)
-ax.plot(predicted_df["pred_lon"], predicted_df["pred_lat"], "-o", color="red", label="OpenDrift (PlastDrift) track",
+ax.plot(predicted_df["pred_lon"], predicted_df["pred_lat"], "-o", color="green", label="OpenDrift (PlastDrift) track",
         markersize=3, linewidth=1.5, zorder=2)
 ax.set_xlabel("Longitude")
 ax.set_ylabel("Latitude")
