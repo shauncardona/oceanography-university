@@ -1,3 +1,5 @@
+# LOADING LIBRARIES
+
 import os
 import csv
 import math
@@ -13,9 +15,9 @@ from global_land_mask import globe
 # ---------------------------------------------------------
 # INPUT FILES
 
-WIND_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Oil Spill Code Data\Wind1.grib"
-WAVE_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Oil Spill Code Data\Waves1.nc"
-CURRENTS_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Oil Spill Code Data\Currents1.nc"
+WIND_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Oil Spill Code Data\Wind2.grib"
+WAVE_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Oil Spill Code Data\Waves2.nc"
+CURRENTS_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Oil Spill Code Data\Currents2.nc"
 
 # CSV listing candidate spill coordinates (e.g. exported from Google Maps /
 # a GPS tool). Must contain "Latitude", "Longitude" and "Label" columns (as
@@ -74,11 +76,11 @@ OUTPUT_IMAGE_DIR = r"E:\University\Applied Oceanography\Dissertation\Results\Mal
 YEAR = 2025
 
 # length of each simulation
-SIM_DURATION_DAYS = 4
+SIM_DURATION_DAYS = 2
 
 # how many random runs to do per calendar day (one folder is created per
 # day, containing all of that day's runs)
-RUNS_PER_DAY = 15
+RUNS_PER_DAY = 2
 
 # meteorological seasons (Mediterranean / Northern hemisphere convention)
 SEASONS = {
@@ -134,9 +136,8 @@ USE_OIL_WEATHERING = True
 # plot extent
 PLOT_LON_MIN = 12.96
 PLOT_LON_MAX = 15.84
-PLOT_LAT_MIN = 35.434
+PLOT_LAT_MIN = 35.15
 PLOT_LAT_MAX = 37.110
-
 
 # ---------------------------------------------------------
 # SPILL-BOX LOADING
@@ -333,20 +334,20 @@ def build_readers():
 
 
 def run_simulation(
-        readers,
-        start_time,
-        end_time,
-        start_lon,
-        start_lat,
-        oil_type,
-        oil_mass_tonnes,
-        oil_volume_m3,
-        spill_duration_hours,
-        seed_radius_meters,
-        sector_name,
-        spill_type,
-        csv_path,
-        png_path,
+    readers,
+    start_time,
+    end_time,
+    start_lon,
+    start_lat,
+    oil_type,
+    oil_mass_tonnes,
+    oil_volume_m3,
+    spill_duration_hours,
+    seed_radius_meters,
+    sector_name,
+    spill_type,
+    csv_path,
+    png_path,
 ):
     wind_reader, wave_reader, current_reader = readers
 
