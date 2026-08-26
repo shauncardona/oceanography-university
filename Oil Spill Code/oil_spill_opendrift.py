@@ -1,11 +1,10 @@
-# LOADING LIBRARIES
-
 import os
 import csv
 import math
 import random
 from datetime import datetime, timedelta
 
+import numpy as np
 import xarray as xr
 from opendrift.models.openoil import OpenOil
 from opendrift.readers import reader_netCDF_CF_generic
@@ -18,28 +17,45 @@ WIND_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Oil Spill Cod
 WAVE_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Oil Spill Code Data\Waves1.nc"
 CURRENTS_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Oil Spill Code Data\Currents1.nc"
 
-# CSV listing the vessels/spill scenarios to randomly draw from. See the
-# accompanying vessels.csv for the expected columns.
-VESSELS_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Oil Spill Code Data\vessels.csv"
-
 # CSV listing candidate spill coordinates (e.g. exported from Google Maps /
 # a GPS tool). Must contain "Latitude", "Longitude" and "Label" columns (as
 # in coordinates_2026-08-24_0118.csv). Rows are grouped by "Label" (e.g.
 # "Malta North", "Malta South"); the min/max of each group's points defines
 # that sector's bounding box. Each run's spill start point is drawn at
 # random from *inside* the box of the sector it belongs to.
-COORDINATES_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Oil Spill Code Data\coordinates_2026-08-24_0118.csv"
+COORDINATES_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Oil Spill Code Data\coordinates.csv"
 
 # Which sector(s) to actually run. Each entry must match a "Label" value
 # found in COORDINATES_FILE exactly (case-insensitive, whitespace trimmed).
 # The full set of runs (all seasons x RUNS_PER_SEASON) is repeated once per
 # sector listed here.
-SECTORS_TO_RUN = ["Malta North","Malta South"]
+SECTORS_TO_RUN = ["Malta North"]
+
+# ---------------------------------------------------------
+# OIL SPILL SCENARIOS
+# Each run randomly picks one of two spill categories, each with its own
+# set of valid ADIOS oil_type names and its own realistic total-mass range
+# (in tonnes). A crude-oil spill (tanker cargo) is orders of magnitude
+# larger than a heavy-fuel-oil spill (a vessel's own bunker fuel), so each
+# category gets its own scale rather than sharing one volume range.
+
+OIL_SCENARIOS = {
+    "crude_oil": {
+        "oil_types": ["GENERIC HEAVY CRUDE"],
+        "tonnes_min": 50_000,
+        "tonnes_max": 300_000,
+    },
+    "heavy_fuel_oil": {
+        "oil_types": ["GENERIC HEAVY FUEL OIL", "BUNKER C FUEL OIL"],
+        "tonnes_min": 1_000,
+        "tonnes_max": 5_000,
+    },
+}
 
 # ---------------------------------------------------------
 # OUTPUT FOLDERS
 # Each run writes its own CSV and PNG into these folders, named after the
-# season, run number, spill date, start position and vessel used.
+# season, run number, spill date, start position and oil type used.
 
 OUTPUT_CSV_DIR = r"E:\University\Applied Oceanography\Dissertation\Results\Malta Oil Spill\Spillcsv"
 OUTPUT_IMAGE_DIR = r"E:\University\Applied Oceanography\Dissertation\Results\Malta Oil Spill\imagetrajectory"
@@ -60,8 +76,9 @@ YEAR = 2025
 # length of each simulation
 SIM_DURATION_DAYS = 4
 
-# how many random runs to do per season (4 seasons x 5 = 20 total runs)
-RUNS_PER_SEASON = 15
+# how many random runs to do per calendar day (one folder is created per
+# day, containing all of that day's runs)
+RUNS_PER_DAY = 15
 
 # meteorological seasons (Mediterranean / Northern hemisphere convention)
 SEASONS = {
@@ -71,19 +88,35 @@ SEASONS = {
     "autumn": [9, 10, 11],
 }
 
-# set an integer to make the random dates/vessels/positions reproducible
-# run to run, or leave as None for a different draw every time you execute
-# the script
+# reverse lookup: month number -> season name, built once from SEASONS
+MONTH_TO_SEASON = {
+    month: season_name for season_name, months in SEASONS.items() for month in months
+}
+
+# set an integer to make the random dates/oil types/volumes/positions/
+# spill-types reproducible run to run, or leave as None for a different
+# draw every time you execute the script
 RANDOM_SEED = None
 
-# duration of spill (0 for an instantaneous release)
-SPILL_DURATION_HOURS = 0
+# --- Spill type (drawn at random, per run) ---
+# Each run is randomly either:
+#   "instantaneous" - a single-moment release; the initial particle patch
+#       is spread over a random radius between INSTANTANEOUS_RADIUS_MIN_M
+#       and INSTANTANEOUS_RADIUS_MIN_M meters.
+#   "continuous" - a steady release lasting CONTINUOUS_DURATION_CHOICES_HOURS
+#       hours (1 or 2 days), seeded as a point source (radius 0), matching
+#       how a leaking/drifting vessel would be modelled.
+SPILL_TYPES = ["instantaneous", "continuous"]
+
+# random radius range (meters) used for instantaneous spills
+INSTANTANEOUS_RADIUS_MIN_M = 50
+INSTANTANEOUS_RADIUS_MAX_M = 100
+
+# possible continuous-release durations (hours) - chosen at random per run
+CONTINUOUS_DURATION_CHOICES_HOURS = [24, 48]
 
 # number of particles
 NUMBER_OF_PARTICLES = 500
-
-# how widely particles are initially spread around the point (in meters)
-SEED_RADIUS_METERS = 0
 
 # model and output time steps
 MODEL_TIME_STEP_SECONDS = 900
@@ -103,6 +136,7 @@ PLOT_LON_MIN = 12.96
 PLOT_LON_MAX = 15.84
 PLOT_LAT_MIN = 35.434
 PLOT_LAT_MAX = 37.110
+
 
 # ---------------------------------------------------------
 # SPILL-BOX LOADING
@@ -200,73 +234,74 @@ def random_ocean_point_in_box(box, max_attempts=500):
 
 
 # ---------------------------------------------------------
-# VESSEL / OIL LOADING
+# OIL TYPE VALIDATION / DENSITY LOOKUP
 
 
-def load_vessels(path):
+def all_oil_types(oil_scenarios):
+    """Flattens the oil_types lists across every category into one list."""
+    types = []
+    for scenario in oil_scenarios.values():
+        types.extend(scenario["oil_types"])
+    return types
+
+
+def validate_oil_types(oil_types):
     """
-    Reads a CSV file with columns:
-        vessel_name, oil_type, oil_volume_m3, oil_density_kg_per_m3
-
-    oil_type must match a name in the ADIOS oil database
-    (https://adios.orr.noaa.gov/oils), same as OIL_TYPE in the original script.
-
-    Returns a list of dicts, one per vessel.
-    """
-    vessels = []
-    with open(path, newline="") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            vessels.append(
-                {
-                    "vessel_name": row["vessel_name"],
-                    "oil_type": row["oil_type"],
-                    "oil_volume_m3": float(row["oil_volume_m3"]),
-                    "oil_density_kg_per_m3": float(row["oil_density_kg_per_m3"]),
-                }
-            )
-    if not vessels:
-        raise ValueError(f"No vessels found in {path}")
-    return vessels
-
-
-def validate_oil_types(vessels):
-    """
-    Checks every vessel's oil_type against OpenOil's allowed ADIOS oil names
-    *before* any simulation runs, so a typo fails immediately with a clear
-    message instead of mid-batch after time has already been spent.
+    Checks every configured oil_type against OpenOil's allowed ADIOS oil
+    names *before* any simulation runs, so a typo (or an unreachable ADIOS
+    lookup) fails immediately with a clear message instead of mid-batch
+    after time has already been spent.
     """
     checker = OpenOil(loglevel=50)  # loglevel=50 keeps this quiet
     problems = []
-    for vessel in vessels:
+    for oil_type in oil_types:
         try:
-            checker.set_config("seed:oil_type", vessel["oil_type"])
+            checker.set_config("seed:oil_type", oil_type)
         except ValueError:
-            problems.append(f"{vessel['vessel_name']!r} -> {vessel['oil_type']!r}")
+            problems.append(oil_type)
     if problems:
         raise ValueError(
-            "Invalid oil_type found in vessels.csv for:\n  "
-            + "\n  ".join(problems)
+            "Invalid oil_type found in OIL_SCENARIOS:\n  "
+            + "\n  ".join(repr(p) for p in problems)
             + "\nCheck exact spelling against the ADIOS database "
               "(https://adios.orr.noaa.gov/oils)."
         )
 
 
+def build_oil_density_cache(oil_types):
+    """
+    Looks up each oil_type's real ADIOS density once, up front, by seeding
+    a single throwaway element with fallback (zeroed) environment values -
+    no reader files are needed for this. Returns {oil_type: density_kg_m3}.
+
+    This lets each run convert its target spill mass (tonnes) into an
+    approximate volume for seed_elements()'s m3_per_hour argument, using
+    the oil's real density rather than a generic guess.
+    """
+    cache = {}
+    for oil_type in oil_types:
+        probe = OpenOil(loglevel=50)
+        probe.set_config("seed:oil_type", oil_type)
+        for var in ("x_sea_water_velocity", "y_sea_water_velocity", "x_wind", "y_wind"):
+            probe.set_config(f"environment:fallback:{var}", 0)
+        probe.seed_elements(
+            lon=0, lat=0, radius=0, number=1, time=datetime(2000, 1, 1), z=0
+        )
+        cache[oil_type] = float(probe.elements_scheduled.density)
+    return cache
+
+
 # ---------------------------------------------------------
-# RANDOM DATE HELPER
+# DATE HELPER
 
 
-def random_date_in_season(season_months, year):
-    """Returns a random datetime within the given list of months of `year`."""
-    month = random.choice(season_months)
-    if month == 12:
-        days_in_month = 31
-    else:
-        next_month = datetime(year, month % 12 + 1, 1)
-        days_in_month = (next_month - datetime(year, month, 1)).days
-    day = random.randint(1, days_in_month)
-    hour = random.randint(0, 23)
-    return datetime(year, month, day, hour)
+def all_dates_in_year(year):
+    """Yields one datetime (at midnight) per calendar day of `year`."""
+    current = datetime(year, 1, 1)
+    end = datetime(year + 1, 1, 1)
+    while current < end:
+        yield current
+        current += timedelta(days=1)
 
 
 # ---------------------------------------------------------
@@ -297,7 +332,22 @@ def build_readers():
 # SINGLE SIMULATION RUN
 
 
-def run_simulation(readers, start_time, end_time, start_lon, start_lat, vessel, csv_path, png_path):
+def run_simulation(
+        readers,
+        start_time,
+        end_time,
+        start_lon,
+        start_lat,
+        oil_type,
+        oil_mass_tonnes,
+        oil_volume_m3,
+        spill_duration_hours,
+        seed_radius_meters,
+        sector_name,
+        spill_type,
+        csv_path,
+        png_path,
+):
     wind_reader, wave_reader, current_reader = readers
 
     model = OpenOil(loglevel=20)
@@ -311,31 +361,32 @@ def run_simulation(readers, start_time, end_time, start_lon, start_lat, vessel, 
     model.set_config("processes:evaporation", USE_OIL_WEATHERING)
     model.set_config("processes:emulsification", USE_OIL_WEATHERING)
 
-    if SPILL_DURATION_HOURS == 0:
+    if spill_duration_hours == 0:
         seed_time = start_time
-        m3_per_hour = vessel["oil_volume_m3"]
+        m3_per_hour = oil_volume_m3
     else:
-        spill_end_time = start_time + timedelta(hours=SPILL_DURATION_HOURS)
+        spill_end_time = start_time + timedelta(hours=spill_duration_hours)
         seed_time = [start_time, spill_end_time]
-        m3_per_hour = vessel["oil_volume_m3"] / SPILL_DURATION_HOURS
+        m3_per_hour = oil_volume_m3 / spill_duration_hours
 
     model.seed_elements(
         lon=start_lon,
         lat=start_lat,
-        radius=SEED_RADIUS_METERS,
+        radius=seed_radius_meters,
         number=NUMBER_OF_PARTICLES,
         time=seed_time,
         z=0,
-        oil_type=vessel["oil_type"],
+        oil_type=oil_type,
         m3_per_hour=m3_per_hour,
     )
 
-    # use vessel oil_type for oil properties, but keep the mass budget equal
-    # to oil_volume_m3 * oil_density_kg_per_m3
-    model.elements_scheduled.mass_oil = (
-        vessel["oil_volume_m3"] * vessel["oil_density_kg_per_m3"] / NUMBER_OF_PARTICLES
-    )
-    model.elements_scheduled.density = vessel["oil_density_kg_per_m3"]
+    # oil_volume_m3 was only an approximation (target mass / cached density)
+    # used to give seed_elements() a realistic flow rate / initial slick
+    # size. The mass budget itself is set directly and exactly from the
+    # target tonnage, spread evenly across all particles - no need to
+    # re-derive it from density here.
+    oil_mass_kg = oil_mass_tonnes * 1000.0
+    model.elements_scheduled.mass_oil = oil_mass_kg / NUMBER_OF_PARTICLES
 
     model.run(
         duration=end_time - start_time,
@@ -368,18 +419,74 @@ def run_simulation(readers, start_time, end_time, start_lon, start_lat, vessel, 
                 )
 
     # --- writing plot ---
+    # Build a status breakdown (e.g. "Active: 45%, Stranded: 55%") from the
+    # final recorded status of each particle, so the image is meaningful
+    # without needing to cross-reference run_summary.csv. Some particles may
+    # have no valid status at the final timestep (e.g. not yet seeded, for
+    # a continuous release whose seeding window extends close to the end
+    # of the simulation) - these show up as NaN and are reported separately
+    # as "No data" rather than breaking the count.
+    final_statuses = statuses[:, -1]
+    total_particles = final_statuses.shape[0]
+    status_names = getattr(model, "status_categories", None)
+
+    def status_label(code):
+        if status_names is not None and 0 <= code < len(status_names):
+            return status_names[code].replace("_", " ").capitalize()
+        return f"Status {code}"
+
+    valid_mask = ~np.isnan(final_statuses)
+    valid_statuses = final_statuses[valid_mask]
+    nan_count = total_particles - valid_statuses.shape[0]
+
+    unique_codes, counts = np.unique(valid_statuses, return_counts=True)
+    breakdown_pairs = [(status_label(int(code)), count) for code, count in zip(unique_codes, counts)]
+    if nan_count > 0:
+        breakdown_pairs.append(("No data", nan_count))
+
+    breakdown_parts = [
+        f"{label} {count / total_particles:.0%}"
+        for label, count in sorted(breakdown_pairs, key=lambda x: -x[1])
+    ]
+    status_breakdown = ", ".join(breakdown_parts)
+
+    # Describe the spill scenario itself
+    if spill_type == "instantaneous":
+        spill_desc = f"Instantaneous release, seed radius {seed_radius_meters:.0f} m"
+    else:
+        spill_desc = f"Continuous release over {spill_duration_hours:.0f} h"
+
+    title = (
+        f"{sector_name} | {start_time.strftime('%Y-%m-%d %H:%M')} UTC | "
+        f"{oil_type} ({oil_mass_tonnes:,.0f} tonnes)\n"
+        f"{spill_desc} | Start: {start_lat:.3f}N, {start_lon:.3f}E | "
+        f"Simulated {(end_time - start_time).days} days\n"
+        f"Final status: {status_breakdown}"
+    )
+
     model.plot(
         filename=png_path,
         fast=True,
         corners=[PLOT_LON_MIN, PLOT_LON_MAX, PLOT_LAT_MIN, PLOT_LAT_MAX],
+        title=title,
+        legend=True,
     )
 
 
 # ---------------------------------------------------------
-# MAIN: for each sector in SECTORS_TO_RUN, N runs per season, each with a
-# random date, a random start position drawn from that sector's bounding
-# box, and a random vessel. Total runs = len(SECTORS_TO_RUN) x len(SEASONS)
-# x RUNS_PER_SEASON.
+# MAIN: for each sector in SECTORS_TO_RUN, loop over every calendar day of
+# YEAR. For each day, create one folder (named "<season>_<YYYY-MM-DD>")
+# and run RUNS_PER_DAY simulations into it, each with:
+#   - a random hour within that day
+#   - a random ocean start position drawn from that sector's box
+#   - a random oil type and spill volume
+#   - a random spill type (instantaneous with a random 50-100 m seed
+#     radius, or continuous over a random 1-2 day release)
+#
+# Total runs = len(SECTORS_TO_RUN) x 365 (or 366) x RUNS_PER_DAY.
+# NOTE: with the defaults above (2 sectors x 365 days x 10 runs) that is
+# 7,300 simulations - expect this to take a long time to complete. Reduce
+# SECTORS_TO_RUN or RUNS_PER_DAY first if you just want to test the flow.
 
 
 def main():
@@ -389,8 +496,10 @@ def main():
     os.makedirs(OUTPUT_CSV_DIR, exist_ok=True)
     os.makedirs(OUTPUT_IMAGE_DIR, exist_ok=True)
 
-    vessels = load_vessels(VESSELS_FILE)
-    validate_oil_types(vessels)
+    all_oil_type_names = all_oil_types(OIL_SCENARIOS)
+    validate_oil_types(all_oil_type_names)
+    oil_density_cache = build_oil_density_cache(all_oil_type_names)
+    print("Oil density cache (kg/m3):", oil_density_cache)
 
     all_boxes = load_spill_boxes(COORDINATES_FILE)
     for sector_name in SECTORS_TO_RUN:
@@ -408,47 +517,97 @@ def main():
     for sector_name in SECTORS_TO_RUN:
         spill_box = get_box_by_name(all_boxes, sector_name)
         sector_tag = sector_name.strip().replace(" ", "_")
+        sector_csv_dir = os.path.join(OUTPUT_CSV_DIR, sector_tag)
+        sector_png_dir = os.path.join(OUTPUT_IMAGE_DIR, sector_tag)
 
-        for season_name, season_months in SEASONS.items():
-            for run_number in range(1, RUNS_PER_SEASON + 1):
-                start_time = random_date_in_season(season_months, YEAR)
+        for day in all_dates_in_year(YEAR):
+            season_name = MONTH_TO_SEASON[day.month]
+            day_folder_name = f"{season_name}_{day.strftime('%Y-%m-%d')}"
+
+            day_csv_dir = os.path.join(sector_csv_dir, day_folder_name)
+            day_png_dir = os.path.join(sector_png_dir, day_folder_name)
+            os.makedirs(day_csv_dir, exist_ok=True)
+            os.makedirs(day_png_dir, exist_ok=True)
+
+            for run_number in range(1, RUNS_PER_DAY + 1):
+                hour = random.randint(0, 23)
+                start_time = datetime(day.year, day.month, day.day, hour)
                 end_time = start_time + timedelta(days=SIM_DURATION_DAYS)
-                vessel = random.choice(vessels)
+
+                oil_category = random.choice(list(OIL_SCENARIOS.keys()))
+                scenario = OIL_SCENARIOS[oil_category]
+                oil_type = random.choice(scenario["oil_types"])
+                oil_mass_tonnes = random.uniform(scenario["tonnes_min"], scenario["tonnes_max"])
+                oil_mass_kg = oil_mass_tonnes * 1000.0
+                # approximate volume, from the real cached ADIOS density,
+                # used only to give seed_elements() a realistic flow rate
+                oil_volume_m3 = oil_mass_kg / oil_density_cache[oil_type]
+
                 start_lon, start_lat = random_ocean_point_in_box(spill_box)
 
-                date_tag = start_time.strftime("%Y%m%d_%H%M")
+                spill_type = random.choice(SPILL_TYPES)
+                if spill_type == "instantaneous":
+                    spill_duration_hours = 0
+                    seed_radius_meters = random.uniform(
+                        INSTANTANEOUS_RADIUS_MIN_M, INSTANTANEOUS_RADIUS_MAX_M
+                    )
+                else:
+                    spill_duration_hours = random.choice(CONTINUOUS_DURATION_CHOICES_HOURS)
+                    seed_radius_meters = 0
+
+                oil_tag = oil_type.replace(" ", "_")
                 pos_tag = f"{start_lat:.3f}N_{start_lon:.3f}E"
                 base_name = (
-                    f"{sector_tag}_{season_name}_run{run_number}_{date_tag}"
-                    f"_{pos_tag}_{vessel['vessel_name']}"
+                    f"run{run_number}_{start_time.strftime('%H%M')}_{pos_tag}"
+                    f"_{oil_category}_{oil_tag}_{oil_mass_tonnes:.0f}t_{spill_type}"
                 )
 
-                csv_path = os.path.join(OUTPUT_CSV_DIR, f"{base_name}.csv")
-                png_path = os.path.join(OUTPUT_IMAGE_DIR, f"{base_name}.png")
+                csv_path = os.path.join(day_csv_dir, f"{base_name}.csv")
+                png_path = os.path.join(day_png_dir, f"{base_name}.png")
 
                 print(
-                    f"Running {base_name}: sector={sector_name}, start={start_time}, "
-                    f"position=({start_lon:.4f}, {start_lat:.4f}), "
-                    f"vessel={vessel['vessel_name']}, oil={vessel['oil_type']}, "
-                    f"volume={vessel['oil_volume_m3']} m3"
+                    f"Running {sector_name}/{day_folder_name}/{base_name}: "
+                    f"start={start_time}, position=({start_lon:.4f}, {start_lat:.4f}), "
+                    f"category={oil_category}, oil={oil_type}, "
+                    f"mass={oil_mass_tonnes:,.0f} tonnes, "
+                    f"spill_type={spill_type}, "
+                    f"spill_duration_hours={spill_duration_hours}, "
+                    f"seed_radius_meters={seed_radius_meters:.1f}"
                 )
 
                 run_simulation(
-                    readers, start_time, end_time, start_lon, start_lat, vessel, csv_path, png_path
+                    readers,
+                    start_time,
+                    end_time,
+                    start_lon,
+                    start_lat,
+                    oil_type,
+                    oil_mass_tonnes,
+                    oil_volume_m3,
+                    spill_duration_hours,
+                    seed_radius_meters,
+                    sector_name,
+                    spill_type,
+                    csv_path,
+                    png_path,
                 )
 
                 log_rows.append(
                     {
                         "sector": sector_name,
                         "season": season_name,
+                        "date": day.strftime("%Y-%m-%d"),
                         "run": run_number,
                         "start_time": start_time,
                         "end_time": end_time,
                         "start_lon": start_lon,
                         "start_lat": start_lat,
-                        "vessel": vessel["vessel_name"],
-                        "oil_type": vessel["oil_type"],
-                        "oil_volume_m3": vessel["oil_volume_m3"],
+                        "oil_category": oil_category,
+                        "oil_type": oil_type,
+                        "oil_mass_tonnes": oil_mass_tonnes,
+                        "spill_type": spill_type,
+                        "spill_duration_hours": spill_duration_hours,
+                        "seed_radius_meters": seed_radius_meters,
                         "csv_file": csv_path,
                         "png_file": png_path,
                     }
