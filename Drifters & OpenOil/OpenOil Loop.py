@@ -1,160 +1,127 @@
-# LOADING LIBRARIES
+# pip install pandas numpy xarray netCDF4 matplotlib openpyxl openmeteo-requests requests-cache retry-requests opendrift
+
 import glob
 import os
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
-import xarray as xr
 import openmeteo_requests
-import requests_cache
-from retry_requests import retry
 from opendrift.models.oceandrift import OceanDrift
 from opendrift.readers import reader_netCDF_CF_generic
+import pandas as pd
+import requests_cache
+from retry_requests import retry
+import xarray as xr
 
 # Constants
 EARTH_RADIUS_M = 6371000.0
 
-# ----------------------------------------------------------------------
-
-# INPUT FILES & DIRECTORIES (same for every day)
+# Input Files & Directories
 DRIFTER_CSV = r"E:\University\Applied Oceanography\Dissertation\Data\Drifter Data\Drifter 1.csv"
 CURRENTS_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Currents\MonthCurrentsAnalysis.nc"
 WAVE_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Waves\MonthWaveAnalysis.nc"
+EXCEL_PATH = r"E:\University\Applied Oceanography\Dissertation\Data\Drifter Day FID\Drifter 1 Number Log.xlsx"
 
-# BASE OUTPUT DIRECTORY - must contain subfolders "Day 1", "Day 2", ..., "Day 32"
+# Base Output Directory
 OUTPUT_BASE_DIR = r"E:\University\Applied Oceanography\Dissertation\Results\OpenOil\Drifter 1\1 Day Cycle"
 
-# EXCEL SCHEDULE - maps each Day number to the FID to seed from
-EXCEL_PATH = r"E:\University\Applied Oceanography\Dissertation\Data\Drifter Day FID\Drifter 1 Number Log.xlsx"
+# Excel Columns
 DAY_COLUMN = "Day"
 FID_COLUMN = "FID"
 
-# ----------------------------------------------------------------------
-
-# CONFIGURATION PARAMETERS
-SIMULATION_DURATION_DAYS = 1  # simulation automatically ends this many days after the start time
+# Simulation Parameters
+SIMULATION_DURATION_DAYS = 1
 MODEL_TIME_STEP_SECONDS = 900
 OUTPUT_EVERY_SECONDS = 1800
 USE_WAVE_STOKES_DRIFT = True
 
-# Open-Meteo historical forecast configuration
+# Open-Meteo Configuration
 OPENMETEO_MODEL = "italia_meteo_arpae_icon_2i"
 WIND_GRID_MARGIN_DEG = 0.02
 
-# ----------------------------------------------------------------------
 
-# LOAD DRIFTER DATA ONCE (shared across all days)
-if os.path.isdir(DRIFTER_CSV):
-    csv_files = sorted(glob.glob(os.path.join(DRIFTER_CSV, "*.csv")))
-else:
-    csv_files = [DRIFTER_CSV] if os.path.isfile(DRIFTER_CSV) else []
+def load_all_drifter_data(path: str) -> pd.DataFrame:
+    """Load and clean all drifter observations from CSV or folder of CSVs."""
+    if os.path.isdir(path):
+        csv_files = sorted(glob.glob(os.path.join(path, "*.csv")))
+    else:
+        csv_files = [path] if os.path.isfile(path) else []
 
-if not csv_files:
-    raise FileNotFoundError(f"Target drifter CSV file or folder path not found: {DRIFTER_CSV}")
+    if not csv_files:
+        raise FileNotFoundError(f"Target drifter CSV file or folder path not found: {path}")
 
-frames = []
-for f in csv_files:
-    df = pd.read_csv(f)
-    frames.append(df[["FID", "UtcTimestamp", "Latitude", "Longitude"]])
+    frames = [pd.read_csv(f)[["FID", "UtcTimestamp", "Latitude", "Longitude"]] for f in csv_files]
+    drifter_df = pd.concat(frames, ignore_index=True)
+    drifter_df["time_utc"] = pd.to_datetime(drifter_df["UtcTimestamp"], utc=True).dt.tz_localize(None)
 
-drifter_df = pd.concat(frames, ignore_index=True)
-drifter_df["time_utc"] = pd.to_datetime(drifter_df["UtcTimestamp"], utc=True).dt.tz_localize(None)
+    drifter_df = (
+        drifter_df.dropna(subset=["time_utc"])
+        .sort_values("time_utc")
+        .drop_duplicates(subset="time_utc")
+        .reset_index(drop=True)
+        .rename(columns={"Latitude": "lat", "Longitude": "lon"})
+    )
 
-drifter_df = (
-    drifter_df.dropna(subset=["time_utc"])
-    .sort_values("time_utc")
-    .drop_duplicates(subset="time_utc")
-    .reset_index(drop=True)
-)
-drifter_df = drifter_df.rename(columns={"Latitude": "lat", "Longitude": "lon"})
+    if drifter_df.empty:
+        raise ValueError(f"Target drifter CSV resulted in an empty dataset: {path}")
 
-if drifter_df.empty:
-    raise ValueError(f"Target drifter CSV resulted in an empty dataset: {DRIFTER_CSV}")
+    return drifter_df
 
-print(f"Drifter data loaded. Observations: {len(drifter_df)}")
 
-# ----------------------------------------------------------------------
-
-# SHARED OPEN-METEO SESSION (cache persists across all days in the loop)
-cache_session = requests_cache.CachedSession('.cache', expire_after=3600)
-retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
-openmeteo = openmeteo_requests.Client(session=retry_session)
-
-# ----------------------------------------------------------------------
-
-def run_simulation_for_fid(fid_start, output_dir):
-    """Runs the full OceanDrift pipeline for one FID_START, saving outputs to output_dir."""
-
-    os.makedirs(output_dir, exist_ok=True)
-
+def extract_track_for_fid(
+    drifter_df: pd.DataFrame, fid_start: int, duration_days: int
+) -> tuple[pd.DataFrame, float, float, pd.Timestamp, pd.Timestamp]:
+    """Extract start coordinates, start time, and observed track window for a specific FID."""
     start_rows = drifter_df.loc[drifter_df["FID"] == fid_start]
     if start_rows.empty:
-        raise ValueError(f"FID_START {fid_start} not found in the processed drifter data.")
+        raise ValueError(f"FID_START {fid_start} not found in processed drifter data.")
+
     first_point = start_rows.iloc[0]
+    start_lon = float(first_point["lon"])
+    start_lat = float(first_point["lat"])
+    start_time = first_point["time_utc"]
 
-    start_lon = first_point["lon"]
-    start_lat = first_point["lat"]
-    pd_start_time = first_point["time_utc"]
-    dynamic_start_time_py = pd_start_time.to_pydatetime()
-
-    target_end_time = pd_start_time + pd.Timedelta(days=SIMULATION_DURATION_DAYS)
+    target_end_time = start_time + pd.Timedelta(days=duration_days)
     available_end_time = drifter_df["time_utc"].max()
-    end_time_utc = pd.Timestamp(min(target_end_time, available_end_time))
+    end_time = pd.Timestamp(min(target_end_time, available_end_time))
 
-    if end_time_utc <= pd_start_time:
-        raise ValueError(
-            f"No drifter data available after the FID_START ({fid_start}) start time "
-            f"({pd_start_time}). Check your drifter CSV coverage."
-        )
+    if end_time <= start_time:
+        raise ValueError(f"No drifter data available after start time ({start_time}) for FID {fid_start}.")
 
-    print(f"  DYNAMIC SEEDING matching FID_START {fid_start}:")
-    print(f"    Time (UTC): {pd_start_time}")
-    print(f"    Position:   Lat {start_lat}, Lon {start_lon}")
-    print(f"  SIMULATION END (start + {SIMULATION_DURATION_DAYS} days, capped to available data):")
-    print(f"    Time (UTC): {end_time_utc}")
-    if target_end_time > available_end_time:
-        print(f"    NOTE: requested {SIMULATION_DURATION_DAYS}-day end ({target_end_time}) exceeds "
-              f"available drifter data ({available_end_time}); simulation end was capped.")
-
-    simulation_duration_delta = end_time_utc - pd_start_time
-    print(f"  Simulation duration: {simulation_duration_delta}")
-
-    # Actual track used for comparison/plots
     actual_track_df = drifter_df.loc[
-        (drifter_df["time_utc"] >= pd_start_time)
-        & (drifter_df["time_utc"] <= end_time_utc)
+        (drifter_df["time_utc"] >= start_time) & (drifter_df["time_utc"] <= end_time)
     ].reset_index(drop=True)
 
     if actual_track_df.empty:
-        raise ValueError(
-            f"No FID_START ({fid_start}) observations fall within the "
-            f"[{pd_start_time}, {end_time_utc}] window."
-        )
+        raise ValueError(f"No observations for FID {fid_start} within [{start_time}, {end_time}].")
 
-    print(f"  Actual track points in simulation window: {len(actual_track_df)}")
+    return actual_track_df, start_lon, start_lat, start_time, end_time
 
-    # --------------------------------------------------------------
 
-    # FETCHING WIND DATA FROM OPEN-METEO HISTORICAL FORECAST API
-    print("  Fetching historical forecast wind data from Open-Meteo...")
-
+def fetch_openmeteo_wind_dataset(
+    openmeteo_client: openmeteo_requests.Client,
+    start_lat: float,
+    start_lon: float,
+    start_time: pd.Timestamp,
+    end_time: pd.Timestamp,
+    actual_track_df: pd.DataFrame,
+) -> xr.Dataset:
+    """Fetch wind data from Open-Meteo API and format into a spatial xarray Dataset."""
     url = "https://api.open-meteo.com/v1/forecast"
-    openmeteo_params = {
+    params = {
         "latitude": start_lat,
         "longitude": start_lon,
         "hourly": ["wind_speed_10m", "wind_direction_10m"],
         "models": OPENMETEO_MODEL,
-        "start_date": pd_start_time.strftime("%Y-%m-%d"),
-        "end_date": end_time_utc.strftime("%Y-%m-%d"),
+        "start_date": start_time.strftime("%Y-%m-%d"),
+        "end_date": end_time.strftime("%Y-%m-%d"),
     }
 
-    responses = openmeteo.weather_api(url, params=openmeteo_params)
-    response = responses[0]
+    responses = openmeteo_client.weather_api(url, params=params)
+    hourly = responses[0].Hourly()
 
-    hourly = response.Hourly()
-    hourly_wind_speed_10m = hourly.Variables(0).ValuesAsNumpy()
-    hourly_wind_direction_10m = hourly.Variables(1).ValuesAsNumpy()
+    hourly_wind_speed = hourly.Variables(0).ValuesAsNumpy()
+    hourly_wind_direction = hourly.Variables(1).ValuesAsNumpy()
 
     hourly_time = pd.date_range(
         start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
@@ -163,9 +130,9 @@ def run_simulation_for_fid(fid_start, output_dir):
         inclusive="left",
     ).tz_localize(None)
 
-    direction_rad = np.radians(hourly_wind_direction_10m)
-    u10_1d = -hourly_wind_speed_10m * np.sin(direction_rad)
-    v10_1d = -hourly_wind_speed_10m * np.cos(direction_rad)
+    direction_rad = np.radians(hourly_wind_direction)
+    u10_1d = -hourly_wind_speed * np.sin(direction_rad)
+    v10_1d = -hourly_wind_speed * np.cos(direction_rad)
 
     lat_min = actual_track_df["lat"].min() - WIND_GRID_MARGIN_DEG
     lat_max = actual_track_df["lat"].max() + WIND_GRID_MARGIN_DEG
@@ -192,19 +159,23 @@ def run_simulation_for_fid(fid_start, output_dir):
     wind_dataset["u10"].attrs["standard_name"] = "eastward_wind"
     wind_dataset["v10"].attrs["standard_name"] = "northward_wind"
 
-    print(f"  Open-Meteo wind data retrieved: {len(hourly_time)} hourly steps "
-          f"({hourly_time[0]} to {hourly_time[-1]})")
+    return wind_dataset
 
-    # --------------------------------------------------------------
 
-    # READING ENVIRONMENT FORECAST FILES (re-created fresh each call - readers are stateful)
-    wind_reader = reader_netCDF_CF_generic.Reader(wind_dataset, name="Open-Meteo historical forecast wind")
+def run_opendrift_simulation(
+    start_lon: float,
+    start_lat: float,
+    start_time: pd.Timestamp,
+    simulation_duration: pd.Timedelta,
+    wind_dataset: xr.Dataset,
+) -> pd.DataFrame:
+    """Execute OceanDrift simulation for a single point seed."""
+    wind_reader = reader_netCDF_CF_generic.Reader(
+        wind_dataset, name="Open-Meteo historical forecast wind"
+    )
     wave_reader = reader_netCDF_CF_generic.Reader(WAVE_FILE, name="Copernicus waves")
     current_reader = reader_netCDF_CF_generic.Reader(CURRENTS_FILE, name="Copernicus surface currents")
 
-    # --------------------------------------------------------------
-
-    # RUNNING OPENDRIFT
     model = OceanDrift(loglevel=20)
     model.add_reader([wind_reader, wave_reader, current_reader])
 
@@ -216,69 +187,105 @@ def run_simulation_for_fid(fid_start, output_dir):
         lat=start_lat,
         number=1,
         radius=0,
-        time=dynamic_start_time_py,
-        z=0
+        time=start_time.to_pydatetime(),
+        z=0,
     )
 
     model.run(
-        duration=simulation_duration_delta,
+        duration=simulation_duration,
         time_step=MODEL_TIME_STEP_SECONDS,
         time_step_output=OUTPUT_EVERY_SECONDS,
     )
 
-    # --------------------------------------------------------------
-
-    # EXTRACTING TRACKS & PROCESSING SEPARATION METRICS
     predicted_times = pd.to_datetime(model.result.time.values)
     predicted_lons = model.result.lon.values[0, :]
     predicted_lats = model.result.lat.values[0, :]
 
-    predicted_df = pd.DataFrame({
-        "time_utc": predicted_times,
-        "pred_lat": predicted_lats,
-        "pred_lon": predicted_lons
-    }).sort_values("time_utc").reset_index(drop=True)
+    return (
+        pd.DataFrame(
+            {
+                "time_utc": predicted_times,
+                "pred_lat": predicted_lats,
+                "pred_lon": predicted_lons,
+            }
+        )
+        .sort_values("time_utc")
+        .reset_index(drop=True)
+    )
 
-    df_actual_calc = actual_track_df.copy()
-    df_pred_calc = predicted_df.copy()
-    df_actual_calc["time_utc"] = df_actual_calc["time_utc"].astype("datetime64[ns]")
-    df_pred_calc["time_utc"] = df_pred_calc["time_utc"].astype("datetime64[ns]")
+
+def compute_separation_distance(
+    actual_track_df: pd.DataFrame, predicted_df: pd.DataFrame
+) -> pd.DataFrame:
+    """Compute Haversine separation distance (km) between actual and predicted positions."""
+    df_actual = actual_track_df.copy()
+    df_pred = predicted_df.copy()
+    df_actual["time_utc"] = df_actual["time_utc"].astype("datetime64[ns]")
+    df_pred["time_utc"] = df_pred["time_utc"].astype("datetime64[ns]")
 
     merged_df = pd.merge_asof(
-        df_actual_calc.sort_values("time_utc"),
-        df_pred_calc.sort_values("time_utc"),
+        df_actual.sort_values("time_utc"),
+        df_pred.sort_values("time_utc"),
         on="time_utc",
         direction="nearest",
         tolerance=pd.Timedelta("30min"),
     ).dropna(subset=["pred_lat", "pred_lon"]).reset_index(drop=True)
 
-    lat1, lon1, lat2, lon2 = map(np.radians,
-                                 [merged_df["lat"], merged_df["lon"], merged_df["pred_lat"], merged_df["pred_lon"]])
+    lat1, lon1, lat2, lon2 = map(
+        np.radians,
+        [merged_df["lat"], merged_df["lon"], merged_df["pred_lat"], merged_df["pred_lon"]],
+    )
     dlat = lat2 - lat1
     dlon = lon2 - lon1
     haversine_array = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
     merged_df["separation_km"] = (2 * EARTH_RADIUS_M * np.arcsin(np.sqrt(haversine_array))) / 1000.0
 
-    # --------------------------------------------------------------
+    return merged_df
 
-    # SAVING OUTPUT DATA & PLOTS
+
+def save_day_outputs(
+    output_dir: str,
+    fid_start: int,
+    actual_track_df: pd.DataFrame,
+    predicted_df: pd.DataFrame,
+    merged_df: pd.DataFrame,
+    start_time: pd.Timestamp,
+    end_time: pd.Timestamp,
+) -> None:
+    """Save trajectory CSVs, trajectory visual plots, and error metrics summary."""
     actual_track_df.to_csv(os.path.join(output_dir, "drifter_actual_track.csv"), index=False)
     predicted_df.to_csv(os.path.join(output_dir, "predicted_track.csv"), index=False)
     merged_df.to_csv(os.path.join(output_dir, "separation_distances.csv"), index=False)
 
-    start_str = pd_start_time.strftime("%Y-%m-%d %H:%M UTC")
-    end_str = end_time_utc.strftime("%Y-%m-%d %H:%M UTC")
+    start_str = start_time.strftime("%Y-%m-%d %H:%M UTC")
+    end_str = end_time.strftime("%Y-%m-%d %H:%M UTC")
 
+    # Trajectory comparison plot
     fig, ax = plt.subplots(figsize=(9, 8))
-    ax.plot(actual_track_df["lon"], actual_track_df["lat"], "-o", color="blue", label="Actual drifter track",
-            markersize=3, linewidth=1.5, zorder=3)
-    ax.plot(predicted_df["pred_lon"], predicted_df["pred_lat"], "-o", color="red", label="OpenDrift track",
-            markersize=3, linewidth=1.5, zorder=2)
+    ax.plot(
+        actual_track_df["lon"],
+        actual_track_df["lat"],
+        "-o",
+        color="blue",
+        label="Actual drifter track",
+        markersize=3,
+        linewidth=1.5,
+        zorder=3,
+    )
+    ax.plot(
+        predicted_df["pred_lon"],
+        predicted_df["pred_lat"],
+        "-o",
+        color="red",
+        label="OpenDrift track",
+        markersize=3,
+        linewidth=1.5,
+        zorder=2,
+    )
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
     ax.set_title(
-        f"Drifter Trajectory Validation: Actual vs. OpenDrift\n"
-        f"Start: {start_str}   |   End: {end_str}"
+        f"Drifter Trajectory Validation: Actual vs. OpenDrift\nStart: {start_str}   |   End: {end_str}"
     )
     ax.legend()
     ax.grid(True, linestyle="--", alpha=0.4)
@@ -287,13 +294,13 @@ def run_simulation_for_fid(fid_start, output_dir):
     fig.savefig(os.path.join(output_dir, "track_comparison.png"), dpi=200)
     plt.close(fig)
 
+    # Separation distance plot
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.plot(merged_df["time_utc"], merged_df["separation_km"], "-o", color="black", markersize=3)
     ax.set_xlabel("Time (UTC)")
     ax.set_ylabel("Separation distance (km)")
     ax.set_title(
-        f"Distance Between Observed and OpenDrift Positions\n"
-        f"Start: {start_str}   |   End: {end_str}"
+        f"Distance Between Observed and OpenDrift Positions\nStart: {start_str}   |   End: {end_str}"
     )
     ax.grid(True, linestyle="--", alpha=0.4)
     fig.autofmt_xdate()
@@ -301,10 +308,11 @@ def run_simulation_for_fid(fid_start, output_dir):
     fig.savefig(os.path.join(output_dir, "separation_distance.png"), dpi=200)
     plt.close(fig)
 
-    mean_err = merged_df['separation_km'].mean()
-    max_err = merged_df['separation_km'].max()
-    final_err = merged_df['separation_km'].iloc[-1]
+    mean_err = merged_df["separation_km"].mean()
+    max_err = merged_df["separation_km"].max()
+    final_err = merged_df["separation_km"].iloc[-1]
 
+    # Error summary text file
     summary_path = os.path.join(output_dir, "separation_error_summary.txt")
     with open(summary_path, "w") as f:
         f.write("Drifter Trajectory Validation Summary\n")
@@ -321,25 +329,68 @@ def run_simulation_for_fid(fid_start, output_dir):
     print(f"  Outputs saved to: {output_dir}")
 
 
-# ----------------------------------------------------------------------
+def run_simulation_for_fid(
+    drifter_df: pd.DataFrame,
+    openmeteo_client: openmeteo_requests.Client,
+    fid_start: int,
+    output_dir: str,
+) -> None:
+    """Pipeline runner for an individual FID simulation cycle."""
+    os.makedirs(output_dir, exist_ok=True)
 
-# LOOP OVER EVERY DAY IN THE EXCEL SCHEDULE
+    actual_track_df, start_lon, start_lat, start_time, end_time = extract_track_for_fid(
+        drifter_df, fid_start, SIMULATION_DURATION_DAYS
+    )
 
-schedule_df = pd.read_excel(EXCEL_PATH)  # use pd.read_csv(EXCEL_PATH) instead if it's a .csv
+    simulation_duration = end_time - start_time
+    print(f"  Start: {start_time} (Lat {start_lat}, Lon {start_lon})")
+    print(f"  End:   {end_time} (Duration: {simulation_duration})")
 
-for _, row in schedule_df.sort_values(DAY_COLUMN).iterrows():
-    day_num = int(row[DAY_COLUMN])
-    fid = row[FID_COLUMN]
-    day_output_dir = os.path.join(OUTPUT_BASE_DIR, f"Day {day_num}")
+    print("  Fetching historical forecast wind data from Open-Meteo...")
+    wind_dataset = fetch_openmeteo_wind_dataset(
+        openmeteo_client, start_lat, start_lon, start_time, end_time, actual_track_df
+    )
 
-    print(f"\n{'=' * 70}")
-    print(f"RUNNING DAY {day_num}  (FID {fid})")
-    print(f"{'=' * 70}")
+    print("  Running OpenDrift simulation...")
+    predicted_df = run_opendrift_simulation(
+        start_lon, start_lat, start_time, simulation_duration, wind_dataset
+    )
 
-    try:
-        run_simulation_for_fid(fid, day_output_dir)
-    except Exception as e:
-        print(f"  ERROR on Day {day_num} (FID {fid}): {e}")
-        continue
+    merged_df = compute_separation_distance(actual_track_df, predicted_df)
 
-print("\nAll days processed.")
+    save_day_outputs(
+        output_dir, fid_start, actual_track_df, predicted_df, merged_df, start_time, end_time
+    )
+
+
+def main():
+    drifter_df = load_all_drifter_data(DRIFTER_CSV)
+    print(f"Drifter data loaded. Observations: {len(drifter_df)}")
+
+    # Initialize persistent session for Open-Meteo API requests
+    cache_session = requests_cache.CachedSession(".cache", expire_after=3600)
+    retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
+    openmeteo_client = openmeteo_requests.Client(session=retry_session)
+
+    schedule_df = pd.read_excel(EXCEL_PATH)
+
+    for _, row in schedule_df.sort_values(DAY_COLUMN).iterrows():
+        day_num = int(row[DAY_COLUMN])
+        fid = int(row[FID_COLUMN])
+        day_output_dir = os.path.join(OUTPUT_BASE_DIR, f"Day {day_num}")
+
+        print(f"\n{'=' * 70}")
+        print(f"RUNNING DAY {day_num}  (FID {fid})")
+        print(f"{'=' * 70}")
+
+        try:
+            run_simulation_for_fid(drifter_df, openmeteo_client, fid, day_output_dir)
+        except Exception as e:
+            print(f"  ERROR on Day {day_num} (FID {fid}): {e}")
+            continue
+
+    print("\nAll days processed.")
+
+
+if __name__ == "__main__":
+    main()

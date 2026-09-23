@@ -1,83 +1,66 @@
-"""
-Compare in-situ surface-drifter SST measurements against Copernicus Marine
-Service gridded SST data and plot a time series.
+# pip install pandas xarray netCDF4 matplotlib openpyxl
 
-Requirements (install with pip):
-    pip install pandas xarray netCDF4 matplotlib openpyxl
-
-Author: auto-generated for user
-"""
-
-import os
 import glob
+import os
+
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import xarray as xr
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 
-# ----------------------------------------------------------------------
-# 1. USER CONFIGURATION -- edit these paths for your machine
-# ----------------------------------------------------------------------
-DRIFTER_EXCEL_PATH = r"E:\University\Applied Oceanography\Dissertation\Data\Drifter Data\Drifter 1.csv"     # your Excel file
-COPERNICUS_DATA_PATH = r"E:\University\Applied Oceanography\Dissertation\Data\SST\SST.nc"          # folder OR single .nc file
-OUTPUT_DIR = r"E:\University\Applied Oceanography\Dissertation\Results\Sea Surface Temperature"                  # where results are saved
+# File & Output Directories
+DRIFTER_EXCEL_PATH = r"E:\University\Applied Oceanography\Dissertation\Data\Drifter Data\Drifter 1.csv"
+COPERNICUS_DATA_PATH = r"E:\University\Applied Oceanography\Dissertation\Data\SST\SST.nc"
+OUTPUT_DIR = r"E:\University\Applied Oceanography\Dissertation\Results\Sea Surface Temperature"
 
-# If your Copernicus files are split (e.g. one .nc per day), point
-# COPERNICUS_DATA_PATH at the folder and set this pattern:
+# Configuration Options
 COPERNICUS_FILE_PATTERN = "*.nc"
-
-# Candidate variable names for SST -- the first one found in the
-# dataset is used automatically. Add to this list if none match.
 SST_VAR_CANDIDATES = ["analysed_sst", "thetao", "sst", "sea_surface_temperature"]
 
 
-def load_drifter_data(path):
+def load_drifter_data(path: str) -> pd.DataFrame:
+    """Load and validate drifter CSV data with UTC timestamp sorting."""
     df = pd.read_csv(path)
     required_cols = {"Latitude", "Longitude", "SST", "UtcTimestamp"}
     missing = required_cols - set(df.columns)
     if missing:
-        raise ValueError(f"Excel file is missing expected columns: {missing}")
+        raise ValueError(f"Missing expected columns in CSV: {missing}")
 
     df["UtcTimestamp"] = pd.to_datetime(df["UtcTimestamp"], utc=True)
     df = df.sort_values("UtcTimestamp").reset_index(drop=True)
     return df
 
 
-def load_copernicus_dataset(path):
+def load_copernicus_dataset(path: str) -> xr.Dataset:
+    """Load single or multi-file Copernicus NetCDF datasets."""
     if os.path.isdir(path):
         files = sorted(glob.glob(os.path.join(path, COPERNICUS_FILE_PATTERN)))
         if not files:
-            raise FileNotFoundError(
-                f"No files matching {COPERNICUS_FILE_PATTERN} in {path}"
-            )
+            raise FileNotFoundError(f"No files matching {COPERNICUS_FILE_PATTERN} in {path}")
         ds = xr.open_mfdataset(files, combine="by_coords")
     else:
         ds = xr.open_dataset(path)
     return ds
 
 
-def find_sst_variable(ds):
+def find_sst_variable(ds: xr.Dataset) -> str:
+    """Identify the SST variable name within the NetCDF dataset."""
     for name in SST_VAR_CANDIDATES:
         if name in ds.data_vars:
             return name
     raise ValueError(
-        f"Could not find an SST variable automatically. "
-        f"Available variables: {list(ds.data_vars)}. "
-        f"Add the correct name to SST_VAR_CANDIDATES."
+        f"Could not automatically identify SST variable in dataset variables: {list(ds.data_vars)}"
     )
 
 
-def extract_matching_sst(ds, sst_var, df):
-    """For every drifter observation, pull the nearest-in-space/time
-    Copernicus SST value."""
-
+def extract_matching_sst(ds: xr.Dataset, sst_var: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Extract nearest-neighbor Copernicus SST values corresponding to drifter time and location."""
     lat_name = "latitude" if "latitude" in ds.coords else "lat"
     lon_name = "longitude" if "longitude" in ds.coords else "lon"
     time_name = "time" if "time" in ds.coords else "time_counter"
 
-    # Make the dataset's time coordinate timezone-naive UTC so it can
-    # be compared directly against UtcTimestamp.
+    # Align dataset coordinate timezone to UTC naive for direct timestamp matching
     ds_time = pd.to_datetime(ds[time_name].values)
     if ds_time.tz is not None:
         ds = ds.assign_coords({time_name: ds_time.tz_localize(None)})
@@ -94,7 +77,7 @@ def extract_matching_sst(ds, sst_var, df):
                 method="nearest",
             )
             val = float(point.values)
-            # Convert from Kelvin to Celsius if needed
+            # Convert Kelvin to Celsius if temperature values are above 100
             if val > 100:
                 val -= 273.15
         except Exception:
@@ -106,14 +89,13 @@ def extract_matching_sst(ds, sst_var, df):
     return df
 
 
-def plot_time_series(df, output_dir, filename="sst_timeseries_comparison.png"):
+def plot_time_series(df: pd.DataFrame, output_dir: str, filename="sst_timeseries_comparison.png") -> str:
+    """Plot time series comparison of in-situ drifter SST vs gridded Copernicus SST."""
     os.makedirs(output_dir, exist_ok=True)
 
     fig, ax = plt.subplots(figsize=(12, 6))
-    ax.plot(df["UtcTimestamp"], df["SST"], marker="o", markersize=3,
-            linewidth=1, label="Drifter SST")
-    ax.plot(df["UtcTimestamp"], df["Copernicus_SST"], marker="x", markersize=3,
-            linewidth=1, label="Copernicus SST")
+    ax.plot(df["UtcTimestamp"], df["SST"], marker="o", markersize=3, linewidth=1, label="Drifter SST")
+    ax.plot(df["UtcTimestamp"], df["Copernicus_SST"], marker="x", markersize=3, linewidth=1, label="Copernicus SST")
 
     ax.set_xlabel("UTC Time")
     ax.set_ylabel("SST (°C)")

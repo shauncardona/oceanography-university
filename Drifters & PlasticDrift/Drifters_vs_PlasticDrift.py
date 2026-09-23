@@ -1,6 +1,5 @@
 # pip install matplotlib numpy pandas xarray openmeteo-requests requests-cache retry-requests opendrift
 
-# LOADING LIBRARIES
 import glob
 import os
 
@@ -14,39 +13,58 @@ from retry_requests import retry
 from opendrift.models.plastdrift import PlastDrift
 from opendrift.readers import reader_netCDF_CF_generic
 
-# Constants
+# Earth radius (metres), used for haversine distance calculations
 EARTH_RADIUS_M = 6371000.0
 
-# ----------------------------------------------------------------------
+# ============================================================================
+# INPUTS
+# ============================================================================
 
-# INPUT FILES & DIRECTORIES
+# Drifter GPS track: a single CSV file or a folder of CSVs, each with
+# columns FID, UtcTimestamp, Latitude, Longitude
 DRIFTER_CSV = r"E:\University\Applied Oceanography\Dissertation\Data\Drifter Data\Drifter 2.csv"
+
+# NetCDF file of ocean surface currents (Copernicus), used as a model reader
 CURRENTS_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Currents\MonthCurrentsAnalysis.nc"
+
+# NetCDF file of wave data (Copernicus), used as a model reader for Stokes drift
 WAVE_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Waves\MonthWaveAnalysis.nc"
 
-# OUTPUT DIRECTORY
+# ============================================================================
+# OUTPUTS
+# ============================================================================
+
+# All results are written here:
+#   drifter_actual_track.csv       - observed drifter positions within the simulation window
+#   predicted_track.csv            - PlastDrift model's predicted track
+#   separation_distances.csv       - actual vs. predicted, merged with separation distance (km)
+#   track_comparison.png           - plot of actual vs. predicted track (lat/lon)
+#   separation_distance.png        - plot of separation distance (km) over time
+#   separation_error_summary.txt   - mean/max/final separation error as plain text
 OUTPUT_DIR = r"E:\University\Applied Oceanography\Dissertation\Results\PlasticDrift\Drifter 2\1 Week Cycle"
 
-# ----------------------------------------------------------------------
-
+# ============================================================================
 # CONFIGURATION PARAMETERS
-FID_START = 0           # simulation seed position & start time come from this FID's first observation
-SIMULATION_DURATION_DAYS = 7  # simulation automatically ends this many days after the start time
-MODEL_TIME_STEP_SECONDS = 900
-OUTPUT_EVERY_SECONDS = 1800
-USE_WAVE_STOKES_DRIFT = True
+# ============================================================================
 
-# PlastDrift-specific: vertical rise/sink rate of the particle.
+FID_START = 0                    # simulation seed position & start time come from this FID's first observation
+SIMULATION_DURATION_DAYS = 7     # simulation automatically ends this many days after the start time
+MODEL_TIME_STEP_SECONDS = 900    # internal integration time step for OpenDrift
+OUTPUT_EVERY_SECONDS = 1800      # how often OpenDrift writes a position to its output
+USE_WAVE_STOKES_DRIFT = True     # whether wave-induced Stokes drift is included in the model
+
+# Vertical rise/sink rate of the simulated particle.
 # Positive = buoyant (rises to surface), negative = sinks, 0 = neutrally buoyant (stays at seeded depth).
 TERMINAL_VELOCITY_M_S = 0.01
 
-# Open-Meteo historical forecast configuration
+# Open-Meteo historical forecast settings, used to build the wind input
 OPENMETEO_MODEL = "italia_meteo_arpae_icon_2i"
-WIND_GRID_MARGIN_DEG = 0.02
+WIND_GRID_MARGIN_DEG = 0.02       # padding (degrees) added around the drifter track when building the wind grid
 
-# ----------------------------------------------------------------------
+# ============================================================================
+# LOAD DRIFTER DATA & DEFINE THE SIMULATION WINDOW
+# ============================================================================
 
-# LOADING ACTUAL DRIFTER DATA
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 if os.path.isdir(DRIFTER_CSV):
@@ -65,6 +83,7 @@ for f in csv_files:
 drifter_df = pd.concat(frames, ignore_index=True)
 drifter_df["time_utc"] = pd.to_datetime(drifter_df["UtcTimestamp"], utc=True).dt.tz_localize(None)
 
+# Clean up: drop rows with no timestamp, sort chronologically, remove duplicate timestamps
 drifter_df = (
     drifter_df.dropna(subset=["time_utc"])
     .sort_values("time_utc")
@@ -76,6 +95,7 @@ drifter_df = drifter_df.rename(columns={"Latitude": "lat", "Longitude": "lon"})
 if drifter_df.empty:
     raise ValueError(f"Target drifter CSV resulted in an empty dataset: {DRIFTER_CSV}")
 
+# Seed position/time come from FID_START's first observation
 start_rows = drifter_df.loc[drifter_df["FID"] == FID_START]
 if start_rows.empty:
     raise ValueError(f"FID_START {FID_START} not found in the processed drifter data.")
@@ -86,11 +106,10 @@ START_LAT = first_point["lat"]
 pd_start_time = first_point["time_utc"]
 DYNAMIC_START_TIME_UTC_PY = pd_start_time.to_pydatetime()
 
-# End time is simply N days after the start time, capped to whatever actual data exists
+# End time is N days after the start time, capped to whatever actual data exists
 target_end_time = pd_start_time + pd.Timedelta(days=SIMULATION_DURATION_DAYS)
 available_end_time = drifter_df["time_utc"].max()
 end_time_utc = pd.Timestamp(min(target_end_time, available_end_time))
-#added pd.Timestamp to check
 
 if end_time_utc <= pd_start_time:
     raise ValueError(
@@ -111,7 +130,7 @@ if target_end_time > available_end_time:
 simulation_duration_delta = end_time_utc - pd_start_time
 print(f"Simulation duration: {simulation_duration_delta}")
 
-# Actual track used for comparison/plots
+# Actual observed track within the simulation window, used for comparison/plots
 actual_track_df = drifter_df.loc[
     (drifter_df["time_utc"] >= pd_start_time)
     & (drifter_df["time_utc"] <= end_time_utc)
@@ -127,9 +146,9 @@ print(f"Actual track points in simulation window: {len(actual_track_df)}")
 print(actual_track_df[["time_utc", "lat", "lon"]].head())
 print(actual_track_df[["time_utc", "lat", "lon"]].tail())
 
-# ----------------------------------------------------------------------
-
-# FETCHING WIND DATA FROM OPEN-METEO HISTORICAL FORECAST API
+# ============================================================================
+# FETCH WIND DATA FROM THE OPEN-METEO HISTORICAL FORECAST API
+# ============================================================================
 
 print("\nFetching historical forecast wind data from Open-Meteo...")
 
@@ -167,10 +186,9 @@ direction_rad = np.radians(hourly_wind_direction_10m)
 u10_1d = -hourly_wind_speed_10m * np.sin(direction_rad)
 v10_1d = -hourly_wind_speed_10m * np.cos(direction_rad)
 
-# Build a small constant-value spatial grid so the CF-generic reader treats this as
-# gridded data. Sized from the ACTUAL drifter track's own lat/lon bounding box (plus a
-# safety margin) rather than an arbitrary offset from the start point, so the domain
-# comfortably covers wherever the drifter (and simulated particle) actually goes.
+# Build a small constant-value spatial grid so the CF-generic reader treats this as gridded
+# data. Sized from the actual drifter track's own lat/lon bounding box (plus a safety margin)
+# so the domain comfortably covers wherever the drifter (and simulated particle) actually goes.
 lat_min = actual_track_df["lat"].min() - WIND_GRID_MARGIN_DEG
 lat_max = actual_track_df["lat"].max() + WIND_GRID_MARGIN_DEG
 lon_min = actual_track_df["lon"].min() - WIND_GRID_MARGIN_DEG
@@ -202,17 +220,17 @@ wind_dataset["v10"].attrs["standard_name"] = "northward_wind"
 print(f"Open-Meteo wind data retrieved: {len(hourly_time)} hourly steps "
       f"({hourly_time[0]} to {hourly_time[-1]})")
 
-# ----------------------------------------------------------------------
-
-# READING ENVIRONMENT FORECAST FILES
+# ============================================================================
+# BUILD OPENDRIFT READERS FOR WIND, WAVES, AND CURRENTS
+# ============================================================================
 
 wind_reader = reader_netCDF_CF_generic.Reader(wind_dataset, name="Open-Meteo historical forecast wind")
 wave_reader = reader_netCDF_CF_generic.Reader(WAVE_FILE, name="Copernicus waves")
 current_reader = reader_netCDF_CF_generic.Reader(CURRENTS_FILE, name="Copernicus surface currents")
 
-# ----------------------------------------------------------------------
-
-# RUNNING OPENDRIFT (PlastDrift model)
+# ============================================================================
+# RUN OPENDRIFT (PlastDrift model)
+# ============================================================================
 
 model = PlastDrift(loglevel=20)
 model.add_reader([wind_reader, wave_reader, current_reader])
@@ -236,9 +254,9 @@ model.run(
     time_step_output=OUTPUT_EVERY_SECONDS,
 )
 
-# ----------------------------------------------------------------------
-
-# EXTRACTING TRACKS & PROCESSING SEPARATION METRICS
+# ============================================================================
+# EXTRACT THE PREDICTED TRACK & COMPUTE SEPARATION FROM THE ACTUAL TRACK
+# ============================================================================
 
 predicted_times = pd.to_datetime(model.result.time.values)
 predicted_lons = model.result.lon.values[0, :]
@@ -255,6 +273,7 @@ df_pred_calc = predicted_df.copy()
 df_actual_calc["time_utc"] = df_actual_calc["time_utc"].astype("datetime64[ns]")
 df_pred_calc["time_utc"] = df_pred_calc["time_utc"].astype("datetime64[ns]")
 
+# Match each actual observation to its nearest model prediction (within 30 minutes)
 merged_df = pd.merge_asof(
     df_actual_calc.sort_values("time_utc"),
     df_pred_calc.sort_values("time_utc"),
@@ -263,6 +282,7 @@ merged_df = pd.merge_asof(
     tolerance=pd.Timedelta("30min"),
 ).dropna(subset=["pred_lat", "pred_lon"]).reset_index(drop=True)
 
+# Haversine distance (km) between each actual point and its matched prediction
 lat1, lon1, lat2, lon2 = map(np.radians,
                              [merged_df["lat"], merged_df["lon"], merged_df["pred_lat"], merged_df["pred_lon"]])
 dlat = lat2 - lat1
@@ -270,9 +290,9 @@ dlon = lon2 - lon1
 haversine_array = np.sin(dlat / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2) ** 2
 merged_df["separation_km"] = (2 * EARTH_RADIUS_M * np.arcsin(np.sqrt(haversine_array))) / 1000.0
 
-# ----------------------------------------------------------------------
-
-# SAVING OUTPUT DATA & PLOTS
+# ============================================================================
+# SAVE OUTPUT DATA & PLOTS
+# ============================================================================
 
 actual_track_df.to_csv(os.path.join(OUTPUT_DIR, "drifter_actual_track.csv"), index=False)
 predicted_df.to_csv(os.path.join(OUTPUT_DIR, "predicted_track.csv"), index=False)
@@ -282,6 +302,7 @@ merged_df.to_csv(os.path.join(OUTPUT_DIR, "separation_distances.csv"), index=Fal
 start_str = pd_start_time.strftime("%Y-%m-%d %H:%M UTC")
 end_str = end_time_utc.strftime("%Y-%m-%d %H:%M UTC")
 
+# Plot 1: actual vs. predicted track on a lat/lon map
 fig, ax = plt.subplots(figsize=(9, 8))
 ax.plot(actual_track_df["lon"], actual_track_df["lat"], "-o", color="blue", label="Actual drifter track",
         markersize=3, linewidth=1.5, zorder=3)
@@ -300,6 +321,7 @@ fig.tight_layout()
 fig.savefig(os.path.join(OUTPUT_DIR, "track_comparison.png"), dpi=200)
 plt.close(fig)
 
+# Plot 2: separation distance (km) over time
 fig, ax = plt.subplots(figsize=(10, 5))
 ax.plot(merged_df["time_utc"], merged_df["separation_km"], "-o", color="black", markersize=3)
 ax.set_xlabel("Time (UTC)")
@@ -318,7 +340,7 @@ print(f"\nMean separation error:  {merged_df['separation_km'].mean():.3f} km")
 print(f"Max separation error:   {merged_df['separation_km'].max():.3f} km")
 print(f"Final separation error: {merged_df['separation_km'].iloc[-1]:.3f} km")
 
-# Write separation error summary to a text file in the output directory
+# Write a short separation error summary to a text file in the output directory
 summary_path = os.path.join(OUTPUT_DIR, "separation_error_summary.txt")
 with open(summary_path, "w") as f:
     f.write("Drifter Trajectory Validation Summary\n")

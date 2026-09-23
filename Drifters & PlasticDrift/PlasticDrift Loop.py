@@ -1,6 +1,5 @@
 # pip install matplotlib numpy pandas xarray openmeteo-requests requests-cache retry-requests opendrift openpyxl
 
-# LOADING LIBRARIES
 import glob
 import os
 
@@ -14,42 +13,63 @@ from retry_requests import retry
 from opendrift.models.plastdrift import PlastDrift
 from opendrift.readers import reader_netCDF_CF_generic
 
-# Constants
+# Earth radius (metres), used for haversine distance calculations
 EARTH_RADIUS_M = 6371000.0
 
-# ----------------------------------------------------------------------
+# ============================================================================
+# INPUTS
+# ============================================================================
 
-# INPUT FILES & DIRECTORIES (same for every day)
+# Drifter GPS track: a single CSV file or a folder of CSVs, each with
+# columns FID, UtcTimestamp, Latitude, Longitude
 DRIFTER_CSV = r"E:\University\Applied Oceanography\Dissertation\Data\Drifter Data\Drifter 2.csv"
+
+# NetCDF file of ocean surface currents (Copernicus), used as a model reader
 CURRENTS_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Currents\MonthCurrentsAnalysis.nc"
+
+# NetCDF file of wave data (Copernicus), used as a model reader for Stokes drift
 WAVE_FILE = r"E:\University\Applied Oceanography\Dissertation\Data\Waves\MonthWaveAnalysis.nc"
 
-# BASE OUTPUT DIRECTORY - must contain subfolders "Day 1", "Day 2", ..., "Day 32"
+# Excel file mapping each Day number to the drifter FID it should start from.
+# Must contain the columns named in DAY_COLUMN and FID_COLUMN below.
+EXCEL_PATH = r"E:\University\Applied Oceanography\Dissertation\Data\Drifter Day FID\Drifter 2 Number Log.xlsx"  # <-- update to your actual path
+DAY_COLUMN = "Day"   # column in EXCEL_PATH holding the day number
+FID_COLUMN = "FID"   # column in EXCEL_PATH holding the drifter FID to seed each day from
+
+# ============================================================================
+# OUTPUTS
+# ============================================================================
+
+# Results for each day are written to their own subfolder, e.g. "Day 1", "Day 2", ...
+# under OUTPUT_BASE_DIR (created automatically if it doesn't already exist). Each
+# day's subfolder contains:
+#   drifter_actual_track.csv       - observed drifter positions within that day's window
+#   predicted_track.csv            - PlastDrift model's predicted track for that day
+#   separation_distances.csv       - actual vs. predicted, merged with separation distance (km)
+#   track_comparison.png           - plot of actual vs. predicted track (lat/lon)
+#   separation_distance.png        - plot of separation distance (km) over time
+#   separation_error_summary.txt   - mean/max/final separation error as plain text
 OUTPUT_BASE_DIR = r"E:\University\Applied Oceanography\Dissertation\Results\PlasticDrift\Drifter 2\3 Day Cycle"
 
-# EXCEL SCHEDULE - maps each Day number to the FID to seed from
-EXCEL_PATH = r"E:\University\Applied Oceanography\Dissertation\Data\Drifter Day FID\Drifter 2 Number Log.xlsx"  # <-- update to your actual path
-DAY_COLUMN = "Day"
-FID_COLUMN = "FID"
-
-# ----------------------------------------------------------------------
-
+# ============================================================================
 # CONFIGURATION PARAMETERS
-SIMULATION_DURATION_DAYS = 3  # simulation automatically ends this many days after the start time
-MODEL_TIME_STEP_SECONDS = 900
-OUTPUT_EVERY_SECONDS = 1800
-USE_WAVE_STOKES_DRIFT = True
+# ============================================================================
 
-# PlastDrift-specific: vertical rise/sink rate of the particle.
-TERMINAL_VELOCITY_M_S = 0.01
+SIMULATION_DURATION_DAYS = 3     # each day's simulation ends this many days after its own start time
+MODEL_TIME_STEP_SECONDS = 900    # internal integration time step for OpenDrift
+OUTPUT_EVERY_SECONDS = 1800      # how often OpenDrift writes a position to its output
+USE_WAVE_STOKES_DRIFT = True     # whether wave-induced Stokes drift is included in the model
 
-# Open-Meteo historical forecast configuration
+TERMINAL_VELOCITY_M_S = 0.01     # vertical rise/sink rate of the simulated particle
+
+# Open-Meteo historical forecast settings, used to build the wind input for each day
 OPENMETEO_MODEL = "italia_meteo_arpae_icon_2i"
-WIND_GRID_MARGIN_DEG = 0.02
+WIND_GRID_MARGIN_DEG = 0.02       # padding (degrees) added around the drifter track when building the wind grid
 
-# ----------------------------------------------------------------------
+# ============================================================================
+# LOAD DRIFTER DATA (shared across every day in the loop)
+# ============================================================================
 
-# LOAD DRIFTER DATA ONCE (shared across all days)
 if os.path.isdir(DRIFTER_CSV):
     csv_files = sorted(glob.glob(os.path.join(DRIFTER_CSV, "*.csv")))
 else:
@@ -66,6 +86,7 @@ for f in csv_files:
 drifter_df = pd.concat(frames, ignore_index=True)
 drifter_df["time_utc"] = pd.to_datetime(drifter_df["UtcTimestamp"], utc=True).dt.tz_localize(None)
 
+# Clean up: drop rows with no timestamp, sort chronologically, remove duplicate timestamps
 drifter_df = (
     drifter_df.dropna(subset=["time_utc"])
     .sort_values("time_utc")
@@ -79,20 +100,32 @@ if drifter_df.empty:
 
 print(f"Drifter data loaded. Observations: {len(drifter_df)}")
 
-# ----------------------------------------------------------------------
-
-# SHARED OPEN-METEO SESSION (cache persists across all days in the loop)
+# Shared Open-Meteo API session with local caching and automatic retries,
+# reused for every day's wind request so repeated calls aren't re-fetched
 cache_session = requests_cache.CachedSession('.cache', expire_after=3600)
 retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
 openmeteo = openmeteo_requests.Client(session=retry_session)
 
-# ----------------------------------------------------------------------
 
 def run_simulation_for_fid(fid_start, output_dir):
-    """Runs the full PlastDrift pipeline for one FID_START, saving outputs to output_dir."""
+    """
+    Run the full PlastDrift pipeline (seed -> fetch wind -> simulate -> compare ->
+    save) for a single FID_START, writing all outputs into output_dir.
 
+    Inputs:
+        fid_start  - the drifter FID whose first observation seeds this run
+        output_dir - folder to write this run's CSVs, plots, and summary into
+                     (created automatically if missing)
+
+    Output:
+        None. Writes drifter_actual_track.csv, predicted_track.csv,
+        separation_distances.csv, track_comparison.png, separation_distance.png,
+        and separation_error_summary.txt into output_dir. Also prints a short
+        progress/results log to the console.
+    """
     os.makedirs(output_dir, exist_ok=True)
 
+    # Seed position/time come from fid_start's first observation
     start_rows = drifter_df.loc[drifter_df["FID"] == fid_start]
     if start_rows.empty:
         raise ValueError(f"FID_START {fid_start} not found in the processed drifter data.")
@@ -103,6 +136,7 @@ def run_simulation_for_fid(fid_start, output_dir):
     pd_start_time = first_point["time_utc"]
     dynamic_start_time_py = pd_start_time.to_pydatetime()
 
+    # End time is N days after the start time, capped to whatever actual data exists
     target_end_time = pd_start_time + pd.Timedelta(days=SIMULATION_DURATION_DAYS)
     available_end_time = drifter_df["time_utc"].max()
     end_time_utc = pd.Timestamp(min(target_end_time, available_end_time))
@@ -125,6 +159,7 @@ def run_simulation_for_fid(fid_start, output_dir):
     simulation_duration_delta = end_time_utc - pd_start_time
     print(f"  Simulation duration: {simulation_duration_delta}")
 
+    # Actual observed track within this day's simulation window, used for comparison/plots
     actual_track_df = drifter_df.loc[
         (drifter_df["time_utc"] >= pd_start_time)
         & (drifter_df["time_utc"] <= end_time_utc)
@@ -139,8 +174,7 @@ def run_simulation_for_fid(fid_start, output_dir):
     print(f"  Actual track points in simulation window: {len(actual_track_df)}")
 
     # --------------------------------------------------------------
-
-    # FETCHING WIND DATA FROM OPEN-METEO HISTORICAL FORECAST API
+    # Fetch wind data for this day's window from the Open-Meteo historical forecast API
     print("  Fetching historical forecast wind data from Open-Meteo...")
 
     url = "https://api.open-meteo.com/v1/forecast"
@@ -167,10 +201,13 @@ def run_simulation_for_fid(fid_start, output_dir):
         inclusive="left",
     ).tz_localize(None)
 
+    # Convert wind speed/direction into eastward (u) and northward (v) components
     direction_rad = np.radians(hourly_wind_direction_10m)
     u10_1d = -hourly_wind_speed_10m * np.sin(direction_rad)
     v10_1d = -hourly_wind_speed_10m * np.cos(direction_rad)
 
+    # Build a small 3x3 grid around the actual track so OpenDrift has spatial coverage,
+    # even though the wind values themselves are uniform across the grid
     lat_min = actual_track_df["lat"].min() - WIND_GRID_MARGIN_DEG
     lat_max = actual_track_df["lat"].max() + WIND_GRID_MARGIN_DEG
     lon_min = actual_track_df["lon"].min() - WIND_GRID_MARGIN_DEG
@@ -200,15 +237,13 @@ def run_simulation_for_fid(fid_start, output_dir):
           f"({hourly_time[0]} to {hourly_time[-1]})")
 
     # --------------------------------------------------------------
-
-    # READING ENVIRONMENT FORECAST FILES
+    # Build fresh readers for wind, waves, and currents (reader objects carry internal state)
     wind_reader = reader_netCDF_CF_generic.Reader(wind_dataset, name="Open-Meteo historical forecast wind")
     wave_reader = reader_netCDF_CF_generic.Reader(WAVE_FILE, name="Copernicus waves")
     current_reader = reader_netCDF_CF_generic.Reader(CURRENTS_FILE, name="Copernicus surface currents")
 
     # --------------------------------------------------------------
-
-    # RUNNING OPENDRIFT (PlastDrift model)
+    # Run OpenDrift's PlastDrift model for this day's segment
     model = PlastDrift(loglevel=20)
     model.add_reader([wind_reader, wave_reader, current_reader])
 
@@ -232,8 +267,7 @@ def run_simulation_for_fid(fid_start, output_dir):
     )
 
     # --------------------------------------------------------------
-
-    # EXTRACTING TRACKS & PROCESSING SEPARATION METRICS
+    # Extract the predicted track and compute separation from the actual track
     predicted_times = pd.to_datetime(model.result.time.values)
     predicted_lons = model.result.lon.values[0, :]
     predicted_lats = model.result.lat.values[0, :]
@@ -249,6 +283,7 @@ def run_simulation_for_fid(fid_start, output_dir):
     df_actual_calc["time_utc"] = df_actual_calc["time_utc"].astype("datetime64[ns]")
     df_pred_calc["time_utc"] = df_pred_calc["time_utc"].astype("datetime64[ns]")
 
+    # Match each actual observation to its nearest model prediction (within 30 minutes)
     merged_df = pd.merge_asof(
         df_actual_calc.sort_values("time_utc"),
         df_pred_calc.sort_values("time_utc"),
@@ -257,6 +292,7 @@ def run_simulation_for_fid(fid_start, output_dir):
         tolerance=pd.Timedelta("30min"),
     ).dropna(subset=["pred_lat", "pred_lon"]).reset_index(drop=True)
 
+    # Haversine distance (km) between each actual point and its matched prediction
     lat1, lon1, lat2, lon2 = map(np.radians,
                                  [merged_df["lat"], merged_df["lon"], merged_df["pred_lat"], merged_df["pred_lon"]])
     dlat = lat2 - lat1
@@ -265,8 +301,7 @@ def run_simulation_for_fid(fid_start, output_dir):
     merged_df["separation_km"] = (2 * EARTH_RADIUS_M * np.arcsin(np.sqrt(haversine_array))) / 1000.0
 
     # --------------------------------------------------------------
-
-    # SAVING OUTPUT DATA & PLOTS
+    # Save this day's CSV outputs and plots
     actual_track_df.to_csv(os.path.join(output_dir, "drifter_actual_track.csv"), index=False)
     predicted_df.to_csv(os.path.join(output_dir, "predicted_track.csv"), index=False)
     merged_df.to_csv(os.path.join(output_dir, "separation_distances.csv"), index=False)
@@ -274,6 +309,7 @@ def run_simulation_for_fid(fid_start, output_dir):
     start_str = pd_start_time.strftime("%Y-%m-%d %H:%M UTC")
     end_str = end_time_utc.strftime("%Y-%m-%d %H:%M UTC")
 
+    # Plot 1: actual vs. predicted track on a lat/lon map
     fig, ax = plt.subplots(figsize=(9, 8))
     ax.plot(actual_track_df["lon"], actual_track_df["lat"], "-o", color="blue", label="Actual drifter track",
             markersize=3, linewidth=1.5, zorder=3)
@@ -292,6 +328,7 @@ def run_simulation_for_fid(fid_start, output_dir):
     fig.savefig(os.path.join(output_dir, "track_comparison.png"), dpi=200)
     plt.close(fig)
 
+    # Plot 2: separation distance (km) over time
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.plot(merged_df["time_utc"], merged_df["separation_km"], "-o", color="black", markersize=3)
     ax.set_xlabel("Time (UTC)")
@@ -310,6 +347,7 @@ def run_simulation_for_fid(fid_start, output_dir):
     max_err = merged_df['separation_km'].max()
     final_err = merged_df['separation_km'].iloc[-1]
 
+    # Write a short separation error summary to a text file in this day's output folder
     summary_path = os.path.join(output_dir, "separation_error_summary.txt")
     with open(summary_path, "w") as f:
         f.write("Drifter Trajectory Validation Summary\n")
@@ -326,9 +364,9 @@ def run_simulation_for_fid(fid_start, output_dir):
     print(f"  Outputs saved to: {output_dir}")
 
 
-# ----------------------------------------------------------------------
-
-# LOOP OVER EVERY DAY IN THE EXCEL SCHEDULE
+# ============================================================================
+# MAIN LOOP - run one simulation per day listed in the Excel schedule
+# ============================================================================
 
 schedule_df = pd.read_excel(EXCEL_PATH)  # use pd.read_csv(EXCEL_PATH) instead if it's a .csv
 
@@ -344,6 +382,7 @@ for _, row in schedule_df.sort_values(DAY_COLUMN).iterrows():
     try:
         run_simulation_for_fid(fid, day_output_dir)
     except Exception as e:
+        # A failure on one day (e.g. missing FID, no data in window) doesn't stop the rest of the run
         print(f"  ERROR on Day {day_num} (FID {fid}): {e}")
         continue
 
