@@ -4,7 +4,20 @@ import os
 import csv
 import math
 import random
+import traceback
 from datetime import datetime, timedelta
+
+# Force the non-interactive Agg backend BEFORE any other matplotlib-using
+# import (opendrift imports matplotlib.pyplot internally). On Windows, the
+# default interactive backend allocates real OS-level GDI bitmap handles
+# per figure; across thousands of batch runs these can accumulate faster
+# than they're released and eventually exhaust the process's GDI handle
+# limit, crashing the whole process with "Fail to allocate bitmap" - a
+# native crash that a Python try/except cannot catch after the fact. Agg
+# renders entirely in memory and avoids this class of crash.
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 import numpy as np
 import xarray as xr
@@ -76,11 +89,11 @@ OUTPUT_IMAGE_DIR = r"E:\University\Applied Oceanography\Dissertation\Results\Mal
 YEAR = 2025
 
 # length of each simulation
-SIM_DURATION_DAYS = 2
+SIM_DURATION_DAYS = 4
 
 # how many random runs to do per calendar day (one folder is created per
 # day, containing all of that day's runs)
-RUNS_PER_DAY = 2
+RUNS_PER_DAY = 15
 
 # meteorological seasons (Mediterranean / Northern hemisphere convention)
 SEASONS = {
@@ -136,7 +149,7 @@ USE_OIL_WEATHERING = True
 # plot extent
 PLOT_LON_MIN = 12.96
 PLOT_LON_MAX = 15.84
-PLOT_LAT_MIN = 35.15
+PLOT_LAT_MIN = 35.5
 PLOT_LAT_MAX = 37.110
 
 # ---------------------------------------------------------
@@ -473,6 +486,13 @@ def run_simulation(
         legend=True,
     )
 
+    # Explicitly release every figure this run created. Over thousands of
+    # runs, unclosed matplotlib figures accumulate in memory (and, on the
+    # default Windows backend, as GDI bitmap handles) until the process
+    # crashes - closing here prevents that build-up regardless of exactly
+    # how many figures model.plot() itself left open.
+    plt.close("all")
+
 
 # ---------------------------------------------------------
 # MAIN: for each sector in SECTORS_TO_RUN, loop over every calendar day of
@@ -576,22 +596,38 @@ def main():
                     f"seed_radius_meters={seed_radius_meters:.1f}"
                 )
 
-                run_simulation(
-                    readers,
-                    start_time,
-                    end_time,
-                    start_lon,
-                    start_lat,
-                    oil_type,
-                    oil_mass_tonnes,
-                    oil_volume_m3,
-                    spill_duration_hours,
-                    seed_radius_meters,
-                    sector_name,
-                    spill_type,
-                    csv_path,
-                    png_path,
-                )
+                run_simulation_status = "ok"
+                run_simulation_error = ""
+                try:
+                    run_simulation(
+                        readers,
+                        start_time,
+                        end_time,
+                        start_lon,
+                        start_lat,
+                        oil_type,
+                        oil_mass_tonnes,
+                        oil_volume_m3,
+                        spill_duration_hours,
+                        seed_radius_meters,
+                        sector_name,
+                        spill_type,
+                        csv_path,
+                        png_path,
+                    )
+                except Exception as exc:
+                    # Log the failure and move on to the next run instead
+                    # of aborting the whole batch. Also make sure any
+                    # partially-created figures from this run are released
+                    # before continuing.
+                    run_simulation_status = "failed"
+                    run_simulation_error = f"{type(exc).__name__}: {exc}"
+                    print(
+                        f"  !! Run {base_name} FAILED - continuing with next run.\n"
+                        f"     {run_simulation_error}"
+                    )
+                    traceback.print_exc()
+                    plt.close("all")
 
                 log_rows.append(
                     {
@@ -609,6 +645,8 @@ def main():
                         "spill_type": spill_type,
                         "spill_duration_hours": spill_duration_hours,
                         "seed_radius_meters": seed_radius_meters,
+                        "status": run_simulation_status,
+                        "error": run_simulation_error,
                         "csv_file": csv_path,
                         "png_file": png_path,
                     }
@@ -622,6 +660,10 @@ def main():
         writer.writerows(log_rows)
 
     print(f"\nAll runs complete. Summary written to {log_path}")
+
+    failed_count = sum(1 for row in log_rows if row["status"] == "failed")
+    ok_count = len(log_rows) - failed_count
+    print(f"  {ok_count} succeeded, {failed_count} failed (see 'status'/'error' columns in the summary).")
 
 
 if __name__ == "__main__":
